@@ -8,6 +8,8 @@ if [ -z "$signing_identity" ]; then
 fi
 app="target/Index Voice.app"
 mkdir -p "$app/Contents/MacOS" "$app/Contents/Helpers"
+mkdir -p "$app/Contents/Resources"
+cp LICENSE NOTICE "$app/Contents/Resources/"
 cp target/release/index-voice "$app/Contents/MacOS/IndexVoice"
 cp target/release/pebble-index "$app/Contents/Helpers/pebble-index"
 for helper in Bluetooth SpeechStream AudioDecode Paste Microphone; do

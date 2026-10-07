@@ -1,6 +1,11 @@
 # Pebble Index 01 — Rust版
 
+> **非公式・自己責任での利用について**  
+> このソフトウェアは、Pebble Index 01をMacへ直接接続して使用する非公式の実装です。メーカーが提供する本来の利用方法とは異なります。使用・改変・開発は、ご自身の責任で行ってください。動作やデータの保全を保証するものではありません。
+
 Index 01の音声をMacへBLE転送し、標準で **Apple SpeechAnalyzer / SpeechTranscriber** を使って文字起こしします。通常起動・Webhook・ファイル文字起こしは共通の認識アダプターを使います。SpeechAnalyzerの実行にはPython・uvは不要です。On Device（Qwen3-ASR MLX）のみ専用のPython環境を使います（旧`desktop/python`には依存しません）。
+
+この独立した `desktop/rust` リポジトリの独自実装は **Apache License 2.0** で提供します。[LICENSE](LICENSE) と [NOTICE](NOTICE) を参照してください。依存ライブラリ・モデル・Apple SDK等にはそれぞれのライセンス・利用条件が適用されます。親の `mobileapp` や他のリポジトリのライセンスを変更するものではありません。
 
 ## 必要なもの
 

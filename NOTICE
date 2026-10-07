@@ -1,0 +1,12 @@
+Index Voice / Pebble Index 01 Rust client
+Copyright 2026 Index Voice contributors
+
+The original implementation in this repository is licensed under the
+Apache License, Version 2.0. See LICENSE.
+
+This is an unofficial project, not a manufacturer-supported use of
+Pebble Index 01. Product names and trademarks belong to their owners.
+
+Third-party libraries, downloaded speech models and platform SDKs retain
+their respective licenses and notices. This license does not relicense
+the parent mobileapp repository or any other third-party work.
