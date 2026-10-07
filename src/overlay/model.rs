@@ -38,6 +38,11 @@ pub struct Item {
     pub phase: Phase,
     dismissed: bool,
 }
+impl Item {
+    fn in_history(&self) -> bool {
+        self.phase == Phase::Ready && !self.text.trim().is_empty()
+    }
+}
 #[derive(Default)]
 pub struct Model {
     pub items: Vec<Item>,
@@ -197,20 +202,20 @@ impl Model {
     }
     fn prune(&mut self) {
         self.items
-            .retain(|i| !(i.dismissed && i.phase == Phase::Failed));
-        let mut excess = self.items.iter().filter(|i| i.phase == Phase::Ready).count().saturating_sub(200);
+            .retain(|i| !(i.dismissed && (i.phase == Phase::Failed || (i.phase == Phase::Ready && !i.in_history()))));
+        let mut excess = self.items.iter().filter(|i| i.in_history()).count().saturating_sub(200);
         self.items.retain(|i| {
-            if excess > 0 && i.phase == Phase::Ready && Some(i.id) != self.active {
+            if excess > 0 && i.in_history() && Some(i.id) != self.active {
                 excess -= 1;
                 false
             } else { true }
         });
     }
     pub fn history(&self) -> Vec<String> {
-        self.items.iter().filter(|i| i.phase == Phase::Ready).map(|i| i.text.clone()).collect()
+        self.items.iter().filter(|i| i.in_history()).map(|i| i.text.clone()).collect()
     }
     pub fn restore_history(&mut self, texts: Vec<String>) {
-        for text in texts.into_iter().rev().take(200).collect::<Vec<_>>().into_iter().rev() {
+        for text in texts.into_iter().filter(|text| !text.trim().is_empty()).rev().take(200).collect::<Vec<_>>().into_iter().rev() {
             self.add(None, Phase::Ready, 0);
             let item = self.items.last_mut().unwrap();
             item.text = text;
@@ -221,9 +226,9 @@ impl Model {
     pub fn browse(&mut self, older: bool, target: i32) -> bool {
         let current = self.active;
         let candidate = if older {
-            self.items.iter().rev().find(|i| i.phase == Phase::Ready && current.is_none_or(|id| i.id < id))
+            self.items.iter().rev().find(|i| i.in_history() && current.is_none_or(|id| i.id < id))
         } else {
-            self.items.iter().find(|i| i.phase == Phase::Ready && current.is_some_and(|id| i.id > id))
+            self.items.iter().find(|i| i.in_history() && current.is_some_and(|id| i.id > id))
         }.map(|i| i.id);
         let Some(id) = candidate else { return false };
         self.active = Some(id);
