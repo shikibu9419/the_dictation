@@ -23,6 +23,7 @@ unsafe extern "C" {
     fn index_panel_setup(view: *mut c_void, callback: extern "C" fn(i32));
     fn index_frontmost_pid() -> i32;
     fn index_panel_show(target: i32);
+    fn index_panel_editing(editing: bool);
     fn index_panel_hide();
     fn index_panel_resize(height: f64);
     fn index_reduce_motion() -> bool;
@@ -224,6 +225,7 @@ impl Overlay {
     }
 
     fn update_panel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let was_editing = self.editing;
         let editable = self
             .model
             .visible()
@@ -245,6 +247,9 @@ impl Overlay {
             }
         } else {
             self.editing = None;
+        }
+        if self.editing != was_editing {
+            unsafe { index_panel_editing(self.editing.is_some()); }
         }
         let visible =
             !self.pasting && (self.model.visible().is_some() || self.model.error.is_some());
@@ -280,7 +285,11 @@ impl Overlay {
                     eprintln!("[GUI] Capture paste target: {error:#}");
                 }
                 index_panel_show(pid);
-                window.focus(&self.focus);
+                if self.editing.is_some() {
+                    self.input.update(cx, |input, cx| input.focus(window, cx));
+                } else {
+                    window.focus(&self.focus);
+                }
             } else if !visible && self.shown {
                 index_panel_hide();
             }
@@ -627,7 +636,7 @@ fn main() -> anyhow::Result<()> {
         cx.on_action(|_: &Quit, cx| cx.quit());
         let bounds = Bounds::centered(None, size(px(580.), px(58.)), cx);
         let mut overlay = None;
-        let _handle = cx.open_window(WindowOptions { window_bounds: Some(WindowBounds::Windowed(bounds)), titlebar: None, kind: WindowKind::PopUp,
+        let _handle = cx.open_window(WindowOptions { window_bounds: Some(WindowBounds::Windowed(bounds)), titlebar: None, kind: WindowKind::Normal,
             focus: false, show: false, is_resizable: false, is_minimizable: false, window_background: WindowBackgroundAppearance::Transparent, ..Default::default() }, |window, cx| {
             if let RawWindowHandle::AppKit(handle) = HasWindowHandle::window_handle(window).unwrap().as_raw() { unsafe { index_panel_setup(handle.ns_view.as_ptr(), menu_action);  } }
             let input = cx.new(|cx| InputState::new(window, cx).multi_line(true).rows(1));

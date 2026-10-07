@@ -2,9 +2,40 @@
 #import <ApplicationServices/ApplicationServices.h>
 #import <QuartzCore/QuartzCore.h>
 #import <CoreImage/CoreImage.h>
+#import <Carbon/Carbon.h>
 
 static NSWindow *panel;
 static NSView *gpuiView;
+static BOOL editingText = NO;
+static pid_t returnTarget = 0;
+static BOOL sourceIsJapanese(TISInputSourceRef source) {
+    NSArray *languages = (__bridge NSArray *)TISGetInputSourceProperty(source, kTISPropertyInputSourceLanguages);
+    return [languages containsObject:@"ja"];
+}
+static BOOL selectKeyboardSource(BOOL japanese) {
+    NSTextInputContext *context = [gpuiView inputContext];
+    if (!context) { NSLog(@"[Index IME] Missing text input context"); return NO; }
+    NSDictionary *filter = @{
+        (__bridge NSString *)kTISPropertyInputSourceIsEnabled: @YES,
+        (__bridge NSString *)kTISPropertyInputSourceIsSelectCapable: @YES,
+        (__bridge NSString *)kTISPropertyInputSourceCategory: (__bridge NSString *)kTISCategoryKeyboardInputSource
+    };
+    NSArray *sources = CFBridgingRelease(TISCreateInputSourceList((__bridge CFDictionaryRef)filter, false));
+    for (id value in sources) {
+        TISInputSourceRef source = (__bridge TISInputSourceRef)value;
+        BOOL ascii = [(__bridge NSNumber *)TISGetInputSourceProperty(source, kTISPropertyInputSourceIsASCIICapable) boolValue];
+        if (japanese ? !sourceIsJapanese(source) : (!ascii || sourceIsJapanese(source))) continue;
+        NSString *identifier = (__bridge NSString *)TISGetInputSourceProperty(source, kTISPropertyInputSourceID);
+        context.allowedInputSourceLocales = nil;
+        [context activate];
+        OSStatus result = TISSelectInputSource(source);
+        if (result == noErr) context.selectedKeyboardInputSource = identifier;
+        NSLog(@"[Index IME] select=%@ status=%d context_source=%@ active=%d key=%d", identifier, (int)result, context.selectedKeyboardInputSource, NSApp.isActive, panel.isKeyWindow);
+        if (result == noErr) return YES;
+    }
+    NSLog(@"[Index IME] No selectable source for japanese=%d", japanese);
+    return NO;
+}
 static NSVisualEffectView *glass;
 static CALayer *neon, *halo;
 static CAGradientLayer *rim, *bloom;
@@ -112,12 +143,11 @@ void index_panel_setup(void *view, void (*callback)(int)) {
     };
     outsideMonitor = [NSEvent addGlobalMonitorForEventsMatchingMask:NSEventMaskLeftMouseDown | NSEventMaskRightMouseDown handler:outside];
     localMonitor = [NSEvent addLocalMonitorForEventsMatchingMask:NSEventMaskLeftMouseDown | NSEventMaskRightMouseDown handler:^NSEvent *(NSEvent *event) { outside(event); return event; }];
-    // JIS Eisu/Kana keys have no printable character. Route them to AppKit
-    // before GPUI's character-based key translation can discard them.
+    // Select an enabled keyboard source explicitly. handleEvent: alone does
+    // not guarantee that a language-switch key changes the selected source.
     inputSourceMonitor = [NSEvent addLocalMonitorForEventsMatchingMask:NSEventMaskKeyDown handler:^NSEvent *(NSEvent *event) {
-        if (event.window == panel && panel.isKeyWindow &&
-            (event.keyCode == 102 || event.keyCode == 104) &&
-            [[gpuiView inputContext] handleEvent:event]) return nil;
+        if (event.window != panel || !panel.isKeyWindow || !editingText) return event;
+        if ((event.keyCode == 102 || event.keyCode == 104) && selectKeyboardSource(event.keyCode == 104)) return nil;
         return event;
     }];
     panel.appearance = [NSAppearance appearanceNamed:NSAppearanceNameVibrantDark];
@@ -165,7 +195,29 @@ void index_panel_resize(double height) {
 
     });
 }
-void index_panel_hide(void) { dispatch_async(dispatch_get_main_queue(), ^{ [panel orderOut:nil]; }); }
+static void activateTextInput(void) {
+    if (!editingText || !panel.isVisible) return;
+    [NSApp activateIgnoringOtherApps:YES];
+    [panel makeKeyAndOrderFront:nil];
+    [panel makeFirstResponder:gpuiView];
+    [[gpuiView inputContext] activate];
+    NSLog(@"[Index IME] editing active=%d key=%d responder=%@ context=%@ source=%@", NSApp.isActive, panel.isKeyWindow, NSStringFromClass(panel.firstResponder.class), [gpuiView inputContext], [gpuiView inputContext].selectedKeyboardInputSource);
+    if (actionCallback) actionCallback(4);
+}
+void index_panel_editing(bool editing) {
+    editingText = editing;
+    dispatch_async(dispatch_get_main_queue(), ^{
+        if (editingText) activateTextInput();
+        else [[gpuiView inputContext] deactivate];
+    });
+}
+void index_panel_hide(void) { dispatch_async(dispatch_get_main_queue(), ^{
+    [[gpuiView inputContext] deactivate];
+    [panel orderOut:nil];
+    if (NSApp.isActive && returnTarget > 0) {
+        [[NSRunningApplication runningApplicationWithProcessIdentifier:returnTarget] activateWithOptions:0];
+    }
+}); }
 void index_permission(void) {
     dispatch_async(dispatch_get_main_queue(), ^{
         if (!AXIsProcessTrusted()) {
@@ -176,6 +228,7 @@ void index_permission(void) {
 void index_panel_show(int target) {
     // AppKit callbacks must run after GPUI has released its mutable App borrow.
     dispatch_async(dispatch_get_main_queue(), ^{
+    returnTarget = target;
     NSScreen *screen = NSScreen.mainScreen ?: NSScreen.screens.firstObject;
     AXUIElementRef app = AXUIElementCreateApplication(target);
     CFTypeRef window = NULL, raw = NULL;
@@ -202,9 +255,12 @@ void index_panel_show(int target) {
     BOOL animate = !NSWorkspace.sharedWorkspace.accessibilityDisplayShouldReduceMotion && !panel.isVisible;
     [panel setFrameOrigin:NSMakePoint(origin.x, origin.y - (animate ? 6 : 0))];
     panel.alphaValue = animate ? 0 : 1;
+    // Preserve the panel's keyboard handling; only explicitly activate the
+    // application when editing so AppKit can manage the IME input context.
     [panel makeKeyAndOrderFront:nil];
     [panel makeFirstResponder:gpuiView];
     [panel orderFrontRegardless];
+    if (editingText) activateTextInput();
     if (actionCallback) actionCallback(4);
     if (animate) {
         [NSAnimationContext runAnimationGroup:^(NSAnimationContext *context) {
