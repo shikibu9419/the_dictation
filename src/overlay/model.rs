@@ -85,8 +85,12 @@ impl Model {
                     self.collecting = value;
                     if value {
                         self.error = None;
+                        // A BLE state edge has no recording identity. Keep the
+                        // current transcript until audio confirms the next one.
+                        let previous = self.visible().filter(|i| !i.text.is_empty() && matches!(i.phase, Phase::Recording | Phase::Receiving | Phase::Finalizing)).map(|i| i.id);
                         self.add(None, Phase::Recording, target);
                         self.capturing = self.active;
+                        if previous.is_some() { self.active = previous; }
                     } else if let Some(item) =
                         self.items.iter_mut().find(|i| Some(i.id) == self.capturing)
                         && item.phase == Phase::Recording
@@ -104,6 +108,7 @@ impl Model {
                 {
                     if let Some(item) = self.items.iter_mut().find(|i| i.recording.is_none() && matches!(i.phase, Phase::Recording | Phase::Receiving)) {
                         item.recording = Some(key);
+                        if !item.dismissed { self.active = Some(item.id); }
                     } else {
                         self.add(
                             Some(key),
@@ -177,9 +182,9 @@ impl Model {
     }
     pub fn dismiss(&mut self) {
         self.error = None;
-        if let Some(id) = self.visible().map(|i| i.id) {
-            self.dismiss_id(id);
-        }
+        for item in &mut self.items { item.dismissed = true; }
+        self.active = None;
+        self.prune();
     }
     pub fn dismiss_id(&mut self, id: u64) {
         if let Some(item) = self.items.iter_mut().find(|i| i.id == id) {
