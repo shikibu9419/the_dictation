@@ -267,7 +267,12 @@ impl Speech {
                             let key=part.key.clone();let checkpoint=part.checkpoint.clone();
                             if self.mode=="live" && self.lifecycle.lock().unwrap().suppressed(&key) {continue;}
                             self.output.debug(format!("latency {} input wait recording={key}: {:.3}s",self.mode,queued.elapsed().as_secs_f64()));
-                            self.feed(part).await?;
+                            if self.mode=="batch" && part.final_part && part.samples.len() * 1000 < part.rate as usize * 150 {
+                                self.output.debug(format!("recording={key}: below 150ms; returning empty text without speech inference"));
+                                emit(json!({"type":"text","recording":key,"mode":"batch","final":true,"text":""}));
+                            } else {
+                                self.feed(part).await?;
+                            }
                             if self.mode=="batch" {
                                 if let Some(checkpoint) = checkpoint {input.lock().unwrap().commit(&checkpoint)?;}
                                 let mut life=self.lifecycle.lock().unwrap();life.finished.insert(key.clone());life.retire(&key);

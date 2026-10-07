@@ -49,10 +49,14 @@ impl Recordings {
             // These are not utterances and must not create another UI item or
             // feed padded silence into the recognizer.
             if let (Some(samples), Some(rate)) = (&item.samples, item.rate)
-                && samples.len() * 50 < rate as usize
+                && samples.len() * 1000 < rate as usize * 150
             {
-                output.debug(format!("Skipping non-speech collection={index}: {} samples (<20ms), buttons={:?}", samples.len(), item.buttons));
-                return Ok(vec![]);
+                output.debug(format!("Empty result for short collection={index}: {} samples (<150ms), buttons={:?}", samples.len(), item.buttons));
+                return Ok(vec![Part {
+                    key: format!("({index}, {:?})", item.start),
+                    samples: vec![], rate, final_part: true,
+                    next: index.wrapping_add(1),
+                }]);
             }
             return Ok(match (item.samples, item.rate) {
                 (Some(samples), Some(rate)) => vec![Part {
