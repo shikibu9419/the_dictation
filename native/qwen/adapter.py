@@ -154,12 +154,16 @@ class SpeechStart:
             return audio
         audio = np.concatenate((self.pending, audio))
         # Inspect 20 ms frames, using the existing batch silence threshold.
+        active_frames = 0
         for offset in range(0, len(audio), 320):
             frame = audio[offset:offset + 320]
             if len(frame) < 320 and not final:
                 break
-            if np.mean(frame * frame) >= 1e-6:
-                result = audio[max(0, offset - 3200):]
+            active_frames = active_frames + 1 if len(frame) == 320 and np.mean(frame * frame) >= 1e-6 else 0
+            # A button click alone must not open the gate. Require 60 ms,
+            # retaining the onset and its preceding 200 ms once it opens.
+            if active_frames >= 3:
+                result = audio[max(0, offset - 640 - 3200):]
                 # Qwen's STFT needs more than 200 samples even on a short tap.
                 if len(result) < 400 and not final:
                     self.pending = result
@@ -167,7 +171,7 @@ class SpeechStart:
                 self.started = True
                 self.pending = np.empty(0, dtype=np.float32)
                 return np.pad(result, (0, max(0, 400 - len(result))))
-        self.pending = audio[-3520:]
+        self.pending = audio[-4160:]
         return np.empty(0, dtype=np.float32)
 
 
