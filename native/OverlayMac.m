@@ -118,7 +118,7 @@ void index_panel_setup(void *view, void (*callback)(int)) {
     status.button.image = [NSImage imageWithSystemSymbolName:@"waveform.circle" accessibilityDescription:@"Index Voice"];
     menuActions = [IndexMenuActions new];
     NSMenu *menu = [NSMenu new];
-    NSArray *titles = @[@"Index Voice · 準備中", @"貼り付けのアクセス許可…", @"接続を再開", @"終了"];
+    NSArray *titles = @[@"Index Voice · 準備中", @"貼り付けのアクセス許可…", @"リロード", @"終了"];
     for (NSUInteger i = 0; i < titles.count; i++) {
         NSMenuItem *item = [[NSMenuItem alloc] initWithTitle:titles[i] action:i ? @selector(action:) : nil keyEquivalent:@""];
         item.target = menuActions; item.tag = i;

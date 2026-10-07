@@ -130,7 +130,14 @@ async fn download(
             ));
             received.send(json!({"type":"collection","index":index,"raw":STANDARD.encode(raw)}))?;
             received.next = Some(index.wrapping_add(1));
-            if polled.elapsed() >= Duration::from_millis(250) {
+            // Keep release detection responsive while recording. Once released,
+            // give the backlog most of the link instead of polling every packet.
+            let poll_interval = if received.collecting == Some(true) {
+                Duration::from_millis(250)
+            } else {
+                Duration::from_secs(1)
+            };
+            if polled.elapsed() >= poll_interval {
                 state = ble.state(args.timeout).await?;
                 received.state(&state)?;
                 output.debug(format!("ring_state during transfer={state:?}"));
@@ -139,10 +146,14 @@ async fn download(
         }
         received.next = Some(end);
         received.send(json!({"type":"range","start":start,"end":end}))?;
-        state = ble.state(args.timeout).await?;
-        received.state(&state)?;
-        polled = Instant::now();
-        output.debug(format!("ring_state={state:?}"));
+        // The last collection may have just polled state. Do not immediately
+        // spend another BLE round trip reading the same value.
+        if polled.elapsed() >= Duration::from_millis(250) {
+            state = ble.state(args.timeout).await?;
+            received.state(&state)?;
+            polled = Instant::now();
+            output.debug(format!("ring_state={state:?}"));
+        }
         let (new_start, new_end) = ble.range(args.timeout).await?;
         if new_end != end {
             output.debug(format!(
@@ -157,7 +168,11 @@ async fn download(
         }
         start = new_start;
         end = new_end;
-        tokio::time::sleep(Duration::from_secs_f64(args.interval)).await;
+        // The range read itself takes time. When data was consumed this turn,
+        // immediately check again; only back off on an empty pass.
+        if cursor == end {
+            tokio::time::sleep(Duration::from_secs_f64(args.interval)).await;
+        }
     }
 }
 async fn receive(

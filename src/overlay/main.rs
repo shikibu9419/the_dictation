@@ -573,7 +573,7 @@ fn main() -> anyhow::Result<()> {
                             Message::Event(e, generation) if accepts_generation(this.backend.as_ref().map(|b| b.generation), generation) => this.event(e, window, cx),
                             Message::End(generation) if accepts_generation(this.backend.as_ref().map(|b| b.generation), generation) => {
                                 this.backend.take();
-                                let reason = this.model.error.clone().unwrap_or_else(|| "受信が終了しました。メニューから接続を再開してください。".into());
+                                let reason = this.model.error.clone().unwrap_or_else(|| "受信が終了しました。メニューからリロードしてください。".into());
                                 this.event(Event::error(reason), window, cx);
                             }
                             Message::Menu(1) => { if let Some(backend) = &mut this.backend { let _ = backend.send(serde_json::json!({"type":"permission"})); } else { unsafe { index_permission(); } } },
@@ -588,14 +588,13 @@ fn main() -> anyhow::Result<()> {
                                     if let Ok(title) = CString::new(reason) { unsafe { index_status(title.as_ptr()); } }
                                 }
                             },
-                            Message::Menu(2) => if this.backend.is_none() { this.pasting = false; this.model = Model::default(); this.update_panel(window, cx); this.start(window, cx); },
                             Message::Menu(3) => cx.quit(),
                             Message::Menu(4) => { if this.editing.is_some() { this.input.update(cx, |input, cx| input.focus(window, cx)); } else { window.focus(&this.focus); } cx.notify(); },
                             Message::Menu(6) => {
                                 let existing = this.settings_window.is_some_and(|handle| handle.update(cx, |_, window, _| window.activate_window()).is_ok());
                                 if !existing { match settings_view::open(this.backend_path.clone(),cx.entity().downgrade(),cx) { Ok(handle)=>this.settings_window=Some(handle),Err(e)=>eprintln!("Settings: {e:#}") } }
                             },
-                            Message::Menu(7) => {
+                            Message::Menu(2 | 7) => {
                                 this.backend.take(); this.pasting=false; this.model=Model::default(); this.update_panel(window,cx); this.start(window,cx);
                             },
                             Message::Menu(5) => this.dismiss(&Dismiss, window, cx),

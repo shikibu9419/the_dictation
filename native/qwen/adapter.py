@@ -137,6 +137,40 @@ class Cancelled(Exception):
     pass
 
 
+class SpeechStart:
+    """Suppress leading quiet audio, retaining 200 ms before the first onset.
+
+    This is only an onset gate: after it opens, all audio (including pauses) is
+    passed through. It must not split utterances or discard quiet word endings.
+    """
+    def __init__(self):
+        import numpy as np
+        self.pending = np.empty(0, dtype=np.float32)
+        self.started = False
+
+    def feed(self, audio, final=False):
+        import numpy as np
+        if self.started:
+            return audio
+        audio = np.concatenate((self.pending, audio))
+        # Inspect 20 ms frames, using the existing batch silence threshold.
+        for offset in range(0, len(audio), 320):
+            frame = audio[offset:offset + 320]
+            if len(frame) < 320 and not final:
+                break
+            if np.mean(frame * frame) >= 1e-6:
+                result = audio[max(0, offset - 3200):]
+                # Qwen's STFT needs more than 200 samples even on a short tap.
+                if len(result) < 400 and not final:
+                    self.pending = result
+                    return np.empty(0, dtype=np.float32)
+                self.started = True
+                self.pending = np.empty(0, dtype=np.float32)
+                return np.pad(result, (0, max(0, 400 - len(result))))
+        self.pending = audio[-3520:]
+        return np.empty(0, dtype=np.float32)
+
+
 def serve(root, language, mode):
     import time
     import numpy as np
@@ -154,6 +188,7 @@ def serve(root, language, mode):
     session = None
     resampler = None
     last_text = ""
+    onset = SpeechStart()
 
     while True:
         with state.condition:
@@ -162,6 +197,7 @@ def serve(root, language, mode):
             if state.generation != version:
                 version = state.generation
                 session, resampler, last_text = None, None, ""
+                onset = SpeechStart()
             if (mode == "batch" and not state.finish) or (not state.audio and not state.finish):
                 state.condition.wait()
                 continue
@@ -190,20 +226,22 @@ def serve(root, language, mode):
             if mode == "batch":
                 text = ""
                 if len(audio) and np.mean(audio * audio) >= 1e-6:
+                    audio = np.pad(audio, (0, max(0, 400 - len(audio))))
                     result = model.transcribe(audio, language=language, on_progress=progress)
                     if result.truncated:
                         raise RuntimeError("Qwen final transcription was truncated")
                     text = result.text
             else:
-                if session is None:
+                audio = onset.feed(audio, final=final)
+                if session is None and len(audio):
                     session = model.init_streaming(language=language, chunk_size_sec=1.0,
                                                    max_context_sec=30.0,
                                                    reuse_window_prefix=True, commit_at_silence=True)
                 if len(audio):
                     session = model.feed_audio(audio, session)
-                if final:
+                if final and session is not None:
                     session = model.finish_streaming(session)
-                text = session.text
+                text = session.text if session is not None else ""
         except Cancelled:
             continue
         with state.condition:
