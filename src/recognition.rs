@@ -335,7 +335,8 @@ impl Recognition {
     fn add(&mut self, part: Part) -> Result<()> {
         let key = part.key.clone();
         if !self.audio.contains_key(&key) {
-            emit(json!({"type":"recording","recording":key}));
+            let empty = part.final_part && part.samples.is_empty();
+            emit(json!({"type":"recording","recording":key,"empty":empty}));
         }
         let recording = self
             .audio

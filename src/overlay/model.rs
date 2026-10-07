@@ -8,6 +8,8 @@ pub struct Event {
     pub text: Option<String>,
     pub mode: Option<String>,
     pub r#final: Option<bool>,
+    #[serde(default)]
+    pub empty: bool,
 }
 impl Event {
     pub fn error(text: impl Into<String>) -> Self {
@@ -18,6 +20,7 @@ impl Event {
             recording: None,
             mode: None,
             r#final: None,
+            empty: false,
         }
     }
 }
@@ -105,6 +108,11 @@ impl Model {
                 }
             }
             "recording" => {
+                // A tap can still yield an empty result, but must not replace
+                // another recording that is awaiting its final transcript.
+                if e.empty && self.visible().is_some_and(|i| matches!(i.phase, Phase::Recording | Phase::Receiving | Phase::Finalizing)) {
+                    return;
+                }
                 if let Some(key) = e.recording
                     && !self
                         .items
