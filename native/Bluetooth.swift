@@ -172,7 +172,11 @@ final class Bluetooth: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate 
         if operation == "connect" { reply(error: error.map(bluetoothError) ?? "Connection failed") }
     }
     func centralManager(_ central: CBCentralManager, didDisconnectPeripheral peripheral: CBPeripheral, error: Error?) {
-        emit(["type": "disconnected", "address": peripheral.identifier.uuidString])
+        let native = error as NSError?
+        emit(["type": "disconnected", "address": peripheral.identifier.uuidString,
+              "requested": operation == "disconnect", "operation": operation,
+              "error_domain": native?.domain ?? "", "error_code": native?.code ?? 0,
+              "reason": error.map(bluetoothError) ?? "No error supplied by CoreBluetooth"])
         if operation == "disconnect" { current = nil; reply() }
         else if pending != nil && operation != "scan" && operation != "find" && operation != "cached" {
             reply(error: error.map(bluetoothError) ?? "Ring disconnected")

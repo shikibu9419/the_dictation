@@ -40,6 +40,7 @@ impl Received {
             }
         }
         if self.collecting != Some(state.in_collection_state) {
+            self.output.debug(format!("Recording state edge {:?} -> {}; inactive_ms={:?}; next_collection={:?}; state={state:?}", self.collecting, state.in_collection_state, self.inactive_since.map(|t| t.elapsed().as_millis()), self.next));
             self.output
                 .event(&json!({"type":"state","collecting":state.in_collection_state}));
             self.collecting = Some(state.in_collection_state);

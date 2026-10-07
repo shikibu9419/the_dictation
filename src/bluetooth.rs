@@ -131,6 +131,7 @@ impl Bluetooth {
     }
     fn observe(&mut self, event: &Value) {
         if event["type"] == "disconnected" {
+            self.output.debug(format!("BLE disconnect detail: {event}"));
             self.connected = false;
         }
     }
@@ -261,6 +262,7 @@ impl Bluetooth {
     pub async fn state(&mut self, seconds: f64) -> Result<RingState> {
         let data = self.read(0x4003000e, 10, seconds).await?;
         ensure!(data.len() == 10, "Invalid advertisement read response");
+        self.output.debug(format!("Ring state raw={}", data.iter().map(|b| format!("{b:02x}")).collect::<String>()));
         advertisement(&data[2..])
     }
     pub async fn range(&mut self, seconds: f64) -> Result<(u16, u16)> {

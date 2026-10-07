@@ -290,6 +290,8 @@ impl Overlay {
         cx.notify();
     }
     fn event(&mut self, event: Event, window: &mut Window, cx: &mut Context<Self>) {
+        let before = self.model.visible().map(|i| (i.id, i.recording.clone(), i.phase));
+        let cause = format!("type={} recording={:?} collecting={:?} mode={:?} final={:?} empty={}", event.r#type, event.recording, event.collecting, event.mode, event.r#final, event.empty);
         let completed = event.r#type == "text" && event.mode.as_deref() == Some("batch") && event.r#final == Some(true);
         if event.r#type == "error" {
             self.pasting = false;
@@ -307,6 +309,16 @@ impl Overlay {
             );
         }
         self.model.accept(event, target);
+        let after = self.model.visible().map(|i| (i.id, i.recording.clone(), i.phase));
+        if before != after || cause.ends_with("empty=true") {
+            let line = format!("[{}] GUI transition: {before:?} -> {after:?}; {cause}\n", chrono::Local::now().format("%Y-%m-%dT%H:%M:%S%.3f"));
+            if self.verbose { eprint!("{line}"); }
+            if let Some(path) = &self.log {
+                if let Err(error) = std::fs::OpenOptions::new().create(true).append(true).open(path).and_then(|mut file| file.write_all(line.as_bytes())) {
+                    eprintln!("[GUI] Write transition log: {error}");
+                }
+            }
+        }
         if completed { self.save_history(); }
         self.update_panel(window, cx);
     }
