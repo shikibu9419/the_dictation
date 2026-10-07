@@ -597,7 +597,13 @@ fn main() -> anyhow::Result<()> {
                             Message::Menu(2 | 7) => {
                                 this.backend.take(); this.pasting=false; this.model=Model::default(); this.update_panel(window,cx); this.start(window,cx);
                             },
-                            Message::Menu(5) => this.dismiss(&Dismiss, window, cx),
+                            Message::Menu(5) => {
+                                // Outside clicks may change the user's focus, but must not
+                                // dismiss a recording whose result is still arriving.
+                                if !this.model.visible().is_some_and(|item| matches!(item.phase, Phase::Recording | Phase::Receiving | Phase::Finalizing)) {
+                                    this.dismiss(&Dismiss, window, cx);
+                                }
+                            },
                             _ => {},
                         }).is_err() { break; }
                     }
