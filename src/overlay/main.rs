@@ -203,15 +203,26 @@ impl Overlay {
     }
     fn history_move(&mut self, older: bool, window: &mut Window, cx: &mut Context<Self>) {
         if self.pasting || self.editing.is_none() { return; }
-        let boundary = self.input.update(cx, |input, cx| {
-            input.marked_text_range(window, cx).is_none()
-                && if older { input.cursor() == 0 } else { input.cursor() == input.value().len() }
+        let before = self.input.update(cx, |input, cx| {
+            if input.marked_text_range(window, cx).is_some()
+                || input.selected_text_range(false, window, cx).is_some_and(|s| !s.range.is_empty()) {
+                return None;
+            }
+            Some(input.cursor())
         });
-        if boundary && self.model.browse(older, unsafe { index_frontmost_pid() }) {
-            cx.stop_propagation();
-            self.update_panel(window, cx);
-        }
+        let Some(before) = before else { return };
+        let editing = self.editing;
+        // Let the editor perform its normal visual-line movement, then browse
+        // only if the caret could not move. This also handles wrapped lines.
+        cx.defer_in(window, move |this, window, cx| {
+            if !this.pasting && this.editing == editing
+                && this.input.read(cx).cursor() == before
+                && this.model.browse(older, unsafe { index_frontmost_pid() }) {
+                this.update_panel(window, cx);
+            }
+        });
     }
+
     fn update_panel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let editable = self
             .model
