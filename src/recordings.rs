@@ -30,10 +30,11 @@ impl Recordings {
     pub fn add(&mut self, index: u16, raw: &[u8], output: &Output) -> Result<Vec<Part>> {
         let item = decode(raw)?;
         output.debug(format!(
-            "collection={index} bytes={} multipart={} final={}",
+            "collection={index} bytes={} multipart={} final={} recording_start={:?}",
             raw.len(),
             item.multipart,
-            item.final_part
+            item.final_part,
+            item.start
         ));
         if let (Some(samples), Some(rate)) = (&item.samples, item.rate) {
             output.debug(format!(
@@ -44,6 +45,15 @@ impl Recordings {
             ));
         }
         if !item.multipart {
+            // Button-only collections can carry a few dummy PCM samples.
+            // These are not utterances and must not create another UI item or
+            // feed padded silence into the recognizer.
+            if let (Some(samples), Some(rate)) = (&item.samples, item.rate)
+                && samples.len() * 50 < rate as usize
+            {
+                output.debug(format!("Skipping non-speech collection={index}: {} samples (<20ms), buttons={:?}", samples.len(), item.buttons));
+                return Ok(vec![]);
+            }
             return Ok(match (item.samples, item.rate) {
                 (Some(samples), Some(rate)) => vec![Part {
                     key: format!("({index}, {:?})", item.start),
