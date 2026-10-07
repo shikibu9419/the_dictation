@@ -1,3 +1,4 @@
+mod continuation;
 mod index;
 mod pcm;
 pub mod stream;
@@ -23,15 +24,18 @@ pub enum InputEvent {
 /// Source-specific decoding and persistence stay on this side of the PCM boundary.
 pub trait InputAdapter: Send {
     fn decode(&mut self, message: Value, output: &Output) -> Result<Vec<InputEvent>>;
+    fn poll(&mut self, _output: &Output) -> Result<Vec<InputEvent>> {
+        Ok(vec![])
+    }
     fn commit(&mut self, _checkpoint: &Value) -> Result<()> {
         Ok(())
     }
 }
 
-pub fn create(address: &str, command: &str) -> Box<dyn InputAdapter> {
-    if address == "file" || address == "pcm" {
+pub fn create(address: &str, command: &str) -> Result<Box<dyn InputAdapter>> {
+    Ok(if address == "file" || address == "pcm" {
         Box::new(pcm::PcmInput)
     } else {
-        Box::new(index::IndexInput::new(address, command == "listen"))
-    }
+        Box::new(index::IndexInput::new(address, command == "listen")?)
+    })
 }

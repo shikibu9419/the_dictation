@@ -41,8 +41,8 @@ impl Received {
         }
         if self.collecting != Some(state.in_collection_state) {
             self.output.debug(format!("Recording state edge {:?} -> {}; inactive_ms={:?}; next_collection={:?}; state={state:?}", self.collecting, state.in_collection_state, self.inactive_since.map(|t| t.elapsed().as_millis()), self.next));
-            self.output
-                .event(&json!({"type":"state","collecting":state.in_collection_state}));
+            // The input adapter emits the logical recording state after its
+            // continuation grace period. Raw edges stay in the debug log.
             self.collecting = Some(state.in_collection_state);
         }
         self.send(json!({"type":"state","collecting":state.in_collection_state}))
@@ -167,6 +167,7 @@ async fn download(
         if fetch && !state.in_collection_state {
             return Ok(state);
         }
+        received.send(json!({"type":"caught_up"}))?;
         start = new_start;
         end = new_end;
         // The range read itself takes time. When data was consumed this turn,
@@ -256,6 +257,7 @@ async fn receive(
             download(&mut ble, &mut received, &args, &output, fetch).await
         }
         .await;
+        if result.is_err() { received.send(json!({"type":"connection_lost"}))?; }
         ble.unsubscribe().await;
         ble.disconnect().await;
         match result {

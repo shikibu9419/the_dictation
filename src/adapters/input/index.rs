@@ -1,26 +1,38 @@
+use super::continuation::Continuation;
 use super::{AudioChunk, InputAdapter, InputEvent, pcm::PcmInput};
 use crate::{config, output::Output, recordings::Recordings};
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, ensure};
 use base64::{Engine, engine::general_purpose::STANDARD};
 use serde_json::{Value, json};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 pub struct IndexInput {
     recordings: Recordings,
     address: String,
     save_cursor: bool,
+    continuation: Continuation,
 }
 impl IndexInput {
-    pub fn new(address: &str, save_cursor: bool) -> Self {
-        Self {
+    pub fn new(address: &str, save_cursor: bool) -> Result<Self> {
+        let ms = std::env::var("INDEX_VOICE_RESUME_MS")
+            .unwrap_or_else(|_| "500".into())
+            .parse::<u64>()
+            .context("INDEX_VOICE_RESUME_MS must be an integer from 0 to 5000")?;
+        ensure!(ms <= 5000, "INDEX_VOICE_RESUME_MS must be from 0 to 5000");
+        Ok(Self {
             recordings: Recordings::default(),
             address: address.into(),
             save_cursor,
-        }
+            continuation: Continuation::new(Duration::from_millis(if save_cursor {
+                ms
+            } else {
+                0
+            })),
+        })
     }
 }
-impl InputAdapter for IndexInput {
-    fn decode(&mut self, message: Value, output: &Output) -> Result<Vec<InputEvent>> {
+impl IndexInput {
+    fn decode_raw(&mut self, message: Value, output: &Output) -> Result<Vec<InputEvent>> {
         match message["type"].as_str().context("Missing input type")? {
             "collection" => {
                 let started = Instant::now();
@@ -63,6 +75,26 @@ impl InputAdapter for IndexInput {
                 .collect()),
             _ => PcmInput.decode(message, output),
         }
+    }
+}
+impl InputAdapter for IndexInput {
+    fn decode(&mut self, message: Value, output: &Output) -> Result<Vec<InputEvent>> {
+        match message["type"].as_str() {
+            Some("connection_lost") => return Ok(self.continuation.connection_lost(output)),
+            Some("caught_up") => {
+                self.continuation.caught_up(output);
+                return Ok(vec![]);
+            }
+            _ => {}
+        }
+        let mut result = vec![];
+        for event in self.decode_raw(message, output)? {
+            result.extend(self.continuation.apply(event, output)?);
+        }
+        Ok(result)
+    }
+    fn poll(&mut self, output: &Output) -> Result<Vec<InputEvent>> {
+        Ok(self.continuation.poll(output))
     }
     fn commit(&mut self, checkpoint: &Value) -> Result<()> {
         if self.save_cursor {

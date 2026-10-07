@@ -315,6 +315,7 @@ impl Recognition {
         Ok(())
     }
     fn state(&mut self, collecting: bool) -> Result<()> {
+        emit(json!({"type":"state","collecting":collecting}));
         let previous = {
             let mut life = self.lifecycle.lock().unwrap();
             let p = life.collecting;
@@ -383,9 +384,17 @@ impl Recognition {
     }
     async fn input(mut self, input: Arc<Mutex<Box<dyn InputAdapter>>>) -> Result<()> {
         let mut lines = BufReader::new(tokio::io::stdin()).lines();
-        while let Some(line) = lines.next_line().await? {
-            let message: Value = serde_json::from_str(&line)?;
-            let events = input.lock().unwrap().decode(message, &self.output)?;
+        let mut clock = tokio::time::interval(Duration::from_millis(50));
+        clock.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            let events = tokio::select! {
+                line = lines.next_line() => {
+                    let Some(line) = line? else { break };
+                    let message: Value = serde_json::from_str(&line)?;
+                    input.lock().unwrap().decode(message, &self.output)?
+                }
+                _ = clock.tick() => input.lock().unwrap().poll(&self.output)?,
+            };
             for event in events {
                 match event {
                     InputEvent::Audio(part) => self.add(part)?,
@@ -430,7 +439,7 @@ pub async fn worker(options: Options) -> Result<()> {
     let input = Arc::new(Mutex::new(input::create(
         &options.address,
         &options.command,
-    )));
+    )?));
     let mut tasks = JoinSet::new();
     tasks.spawn(live.work(lrx, input.clone()));
     tasks.spawn(batch.work(brx, input.clone()));
