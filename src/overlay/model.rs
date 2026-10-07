@@ -45,6 +45,7 @@ pub struct Model {
     pub ready: bool,
     collecting: bool,
     active: Option<u64>,
+    capturing: Option<u64>,
     next: u64,
 }
 impl Model {
@@ -85,8 +86,9 @@ impl Model {
                     if value {
                         self.error = None;
                         self.add(None, Phase::Recording, target);
+                        self.capturing = self.active;
                     } else if let Some(item) =
-                        self.items.iter_mut().find(|i| Some(i.id) == self.active)
+                        self.items.iter_mut().find(|i| Some(i.id) == self.capturing)
                         && item.phase == Phase::Recording
                     {
                         item.phase = Phase::Receiving;
@@ -129,7 +131,10 @@ impl Model {
                         item.phase = Phase::Failed;
                         item.text = e.text.unwrap_or_default();
                     }
-                    "finalizing" => item.phase = Phase::Finalizing,
+                    "finalizing" if matches!(item.phase, Phase::Recording | Phase::Receiving) => {
+                        item.phase = Phase::Finalizing;
+                    }
+                    "finalizing" => {},
                     _ if e.mode.as_deref() == Some("batch") && e.r#final == Some(true) => {
                         item.phase = Phase::Ready;
                         item.text = e.text.unwrap_or_default();
@@ -140,6 +145,14 @@ impl Model {
                         && !item.dismissed =>
                     {
                         item.text = e.text.unwrap_or_default()
+                    }
+                    _ if e.mode.as_deref() == Some("batch")
+                        && matches!(item.phase, Phase::Recording | Phase::Receiving | Phase::Finalizing) =>
+                    {
+                        item.phase = Phase::Finalizing;
+                        if let Some(text) = e.text.filter(|text| !text.is_empty()) {
+                            item.text = text;
+                        }
                     }
                     _ => {}
                 }
