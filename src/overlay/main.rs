@@ -550,7 +550,7 @@ fn main() -> anyhow::Result<()> {
         Theme::global_mut(cx).background = transparent_black();
         Theme::global_mut(cx).selection = rgba(0x62ddff40).into();
         Theme::global_mut(cx).caret = rgb(0x8bedff).into();
-        cx.bind_keys([KeyBinding::new("shift-enter", gpui_component::input::Enter { secondary: true }, Some("Input")), KeyBinding::new("enter", Paste, Some("Input")), KeyBinding::new("escape", Dismiss, Some("Input")), KeyBinding::new("enter", Paste, Some("Dictation")), KeyBinding::new("escape", Dismiss, Some("Dictation")), KeyBinding::new("cmd-q", Quit, None)]);
+        cx.bind_keys([KeyBinding::new("ctrl-h", gpui_component::input::Backspace, Some("Input")), KeyBinding::new("ctrl-p", gpui_component::input::MoveUp, Some("Input")), KeyBinding::new("ctrl-n", gpui_component::input::MoveDown, Some("Input")), KeyBinding::new("shift-enter", gpui_component::input::Enter { secondary: true }, Some("Input")), KeyBinding::new("enter", Paste, Some("Input")), KeyBinding::new("escape", Dismiss, Some("Input")), KeyBinding::new("enter", Paste, Some("Dictation")), KeyBinding::new("escape", Dismiss, Some("Dictation")), KeyBinding::new("cmd-q", Quit, None)]);
         cx.on_action(|_: &Quit, cx| cx.quit());
         let bounds = Bounds::centered(None, size(px(580.), px(58.)), cx);
         let mut overlay = None;
