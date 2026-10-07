@@ -1,4 +1,5 @@
 mod continuation;
+pub mod gestures;
 mod index;
 mod pcm;
 pub mod stream;
