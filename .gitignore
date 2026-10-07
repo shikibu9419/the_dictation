@@ -1,0 +1,6 @@
+/target/
+*.log
+/recordings/
+
+**/.venv/
+**/__pycache__/
