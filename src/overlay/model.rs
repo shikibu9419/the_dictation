@@ -61,7 +61,6 @@ impl Model {
         self.items
             .iter()
             .find(|i| Some(i.id) == self.active && !i.dismissed)
-            .or_else(|| self.items.iter().find(|i| !i.dismissed))
     }
     fn add(&mut self, recording: Option<String>, phase: Phase, target: i32) {
         self.next += 1;
