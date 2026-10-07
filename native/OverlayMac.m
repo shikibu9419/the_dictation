@@ -127,6 +127,9 @@ void index_panel_setup(void *view, void (*callback)(int)) {
     NSMenuItem *settings = [[NSMenuItem alloc] initWithTitle:@"設定…" action:@selector(action:) keyEquivalent:@","];
     settings.target = menuActions; settings.tag = 6;
     [menu insertItem:settings atIndex:1];
+    NSMenuItem *history = [[NSMenuItem alloc] initWithTitle:@"文字起こし履歴" action:@selector(action:) keyEquivalent:@""];
+    history.target = menuActions; history.tag = 8;
+    [menu insertItem:history atIndex:2];
     status.menu = menu;
     [[[NSWorkspace sharedWorkspace] notificationCenter] addObserver:menuActions selector:@selector(spaceChanged:) name:NSWorkspaceActiveSpaceDidChangeNotification object:nil];
     });

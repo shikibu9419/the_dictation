@@ -48,6 +48,22 @@ extern "C" fn menu_action(action: i32) {
 }
 actions!(index_voice, [Paste, Dismiss, Quit]);
 
+fn history_path() -> std::path::PathBuf {
+    settings::Settings::path().with_file_name("history.json")
+}
+fn load_model() -> Model {
+    let mut model = Model::default();
+    match std::fs::read(history_path()) {
+        Ok(bytes) => match serde_json::from_slice::<Vec<String>>(&bytes) {
+            Ok(texts) => model.restore_history(texts),
+            Err(error) => eprintln!("[GUI] Read history: {error}"),
+        },
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {},
+        Err(error) => eprintln!("[GUI] Read history: {error}"),
+    }
+    model
+}
+
 struct Backend {
     generation: u64,
     child: Child,
@@ -172,6 +188,30 @@ struct Overlay {
     _subscriptions: Vec<Subscription>,
 }
 impl Overlay {
+    fn save_history(&self) {
+        let result = (|| -> anyhow::Result<()> {
+            let path = history_path();
+            let dir = path.parent().unwrap();
+            std::fs::create_dir_all(dir)?;
+            let mut file = tempfile::NamedTempFile::new_in(dir)?;
+            serde_json::to_writer(&mut file, &self.model.history())?;
+            file.flush()?;
+            file.persist(path)?;
+            Ok(())
+        })();
+        if let Err(error) = result { eprintln!("[GUI] Save history: {error:#}"); }
+    }
+    fn history_move(&mut self, older: bool, window: &mut Window, cx: &mut Context<Self>) {
+        if self.pasting || self.editing.is_none() { return; }
+        let boundary = self.input.update(cx, |input, cx| {
+            input.marked_text_range(window, cx).is_none()
+                && if older { input.cursor() == 0 } else { input.cursor() == input.value().len() }
+        });
+        if boundary && self.model.browse(older, unsafe { index_frontmost_pid() }) {
+            cx.stop_propagation();
+            self.update_panel(window, cx);
+        }
+    }
     fn update_panel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let editable = self
             .model
@@ -239,6 +279,7 @@ impl Overlay {
         cx.notify();
     }
     fn event(&mut self, event: Event, window: &mut Window, cx: &mut Context<Self>) {
+        let completed = event.r#type == "text" && event.mode.as_deref() == Some("batch") && event.r#final == Some(true);
         if event.r#type == "error" {
             self.pasting = false;
         }
@@ -255,6 +296,7 @@ impl Overlay {
             );
         }
         self.model.accept(event, target);
+        if completed { self.save_history(); }
         self.update_panel(window, cx);
     }
     fn start(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -368,6 +410,8 @@ impl Render for Overlay {
             .id("dictation")
             .track_focus(&self.focus)
             .key_context("Dictation")
+            .capture_action(cx.listener(|this, _: &gpui_component::input::MoveUp, window, cx| this.history_move(true, window, cx)))
+            .capture_action(cx.listener(|this, _: &gpui_component::input::MoveDown, window, cx| this.history_move(false, window, cx)))
             .on_action(cx.listener(Self::paste))
             .on_action(cx.listener(Self::dismiss))
             .size_full()
@@ -561,11 +605,11 @@ fn main() -> anyhow::Result<()> {
             let view = cx.new(|cx| {
                 let subscription = cx.subscribe_in(&input, window, |this: &mut Overlay, input, event, _, cx| {
                     if matches!(event, InputEvent::Change | InputEvent::PressEnter { .. }) {
-                        if let Some(id) = this.editing { this.model.edit(id, input.read(cx).value().to_string()); }
+                        if let Some(id) = this.editing { this.model.edit(id, input.read(cx).value().to_string()); this.save_history(); }
                         cx.notify();
                     }
                 });
-                let mut view = Overlay { model: Model::default(), focus: cx.focus_handle(), backend: None, backend_path, verbose, shown: false, shown_item: None, pasting: false, log, scroll: ScrollHandle::new(), input, editing: None, panel_height: 0., settings_window: None, _subscriptions: vec![subscription] };
+                let mut view = Overlay { model: load_model(), focus: cx.focus_handle(), backend: None, backend_path, verbose, shown: false, shown_item: None, pasting: false, log, scroll: ScrollHandle::new(), input, editing: None, panel_height: 0., settings_window: None, _subscriptions: vec![subscription] };
                 if !preview { view.start(window, cx); }
                 cx.spawn_in(window, async move |this, cx| {
                     while let Some(message) = events.next().await {
@@ -589,13 +633,14 @@ fn main() -> anyhow::Result<()> {
                                 }
                             },
                             Message::Menu(3) => cx.quit(),
+                            Message::Menu(8) => { if !this.pasting { this.model.open_history(unsafe { index_frontmost_pid() }); this.update_panel(window,cx); } },
                             Message::Menu(4) => { if this.editing.is_some() { this.input.update(cx, |input, cx| input.focus(window, cx)); } else { window.focus(&this.focus); } cx.notify(); },
                             Message::Menu(6) => {
                                 let existing = this.settings_window.is_some_and(|handle| handle.update(cx, |_, window, _| window.activate_window()).is_ok());
                                 if !existing { match settings_view::open(this.backend_path.clone(),cx.entity().downgrade(),cx) { Ok(handle)=>this.settings_window=Some(handle),Err(e)=>eprintln!("Settings: {e:#}") } }
                             },
                             Message::Menu(2 | 7) => {
-                                this.backend.take(); this.pasting=false; this.model=Model::default(); this.update_panel(window,cx); this.start(window,cx);
+                                this.backend.take(); this.pasting=false; this.model=load_model(); this.update_panel(window,cx); this.start(window,cx);
                             },
                             Message::Menu(5) => {
                                 // Outside clicks may change the user's focus, but must not

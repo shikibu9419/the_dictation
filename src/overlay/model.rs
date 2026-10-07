@@ -102,7 +102,7 @@ impl Model {
                         .iter()
                         .any(|i| i.recording.as_ref() == Some(&key))
                 {
-                    if let Some(item) = self.items.iter_mut().find(|i| i.recording.is_none()) {
+                    if let Some(item) = self.items.iter_mut().find(|i| i.recording.is_none() && matches!(i.phase, Phase::Recording | Phase::Receiving)) {
                         item.recording = Some(key);
                     } else {
                         self.add(
@@ -192,7 +192,44 @@ impl Model {
     }
     fn prune(&mut self) {
         self.items
-            .retain(|i| !(i.dismissed && matches!(i.phase, Phase::Ready | Phase::Failed)));
+            .retain(|i| !(i.dismissed && i.phase == Phase::Failed));
+        let mut excess = self.items.iter().filter(|i| i.phase == Phase::Ready).count().saturating_sub(200);
+        self.items.retain(|i| {
+            if excess > 0 && i.phase == Phase::Ready && Some(i.id) != self.active {
+                excess -= 1;
+                false
+            } else { true }
+        });
+    }
+    pub fn history(&self) -> Vec<String> {
+        self.items.iter().filter(|i| i.phase == Phase::Ready).map(|i| i.text.clone()).collect()
+    }
+    pub fn restore_history(&mut self, texts: Vec<String>) {
+        for text in texts.into_iter().rev().take(200).collect::<Vec<_>>().into_iter().rev() {
+            self.add(None, Phase::Ready, 0);
+            let item = self.items.last_mut().unwrap();
+            item.text = text;
+            item.dismissed = true;
+        }
+        self.active = None;
+    }
+    pub fn browse(&mut self, older: bool, target: i32) -> bool {
+        let current = self.active;
+        let candidate = if older {
+            self.items.iter().rev().find(|i| i.phase == Phase::Ready && current.is_none_or(|id| i.id < id))
+        } else {
+            self.items.iter().find(|i| i.phase == Phase::Ready && current.is_some_and(|id| i.id > id))
+        }.map(|i| i.id);
+        let Some(id) = candidate else { return false };
+        self.active = Some(id);
+        let item = self.items.iter_mut().find(|i| i.id == id).unwrap();
+        item.dismissed = false;
+        item.target = target;
+        true
+    }
+    pub fn open_history(&mut self, target: i32) {
+        self.active = None;
+        self.browse(true, target);
     }
     pub fn edit(&mut self, id: u64, text: String) {
         if let Some(item) = self
@@ -252,7 +289,7 @@ mod tests {
         assert_eq!(m.paste(), Some(("最終全文", 42)));
         m.dismiss();
         assert!(m.visible().is_none());
-        assert!(m.items.is_empty());
+        assert_eq!(m.history(), vec!["最終全文"]);
     }
     #[test]
     fn consecutive_recordings_keep_previous_final_and_target() {
@@ -271,7 +308,8 @@ mod tests {
         text(&mut m, "two", "二番", "batch", true);
         assert_eq!(m.paste(), Some(("二番", 99)));
         m.dismiss();
-        assert_eq!(m.paste(), Some(("一番", 42)));
+        assert!(m.paste().is_none());
+        assert_eq!(m.history(), vec!["一番", "二番"]);
     }
     #[test]
     fn escape_suppresses_late_results_and_empty_final_cannot_paste() {
