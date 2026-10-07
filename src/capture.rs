@@ -200,11 +200,18 @@ async fn receive(
     };
     output.event(&json!({"type":"ready"}));
     let mut paired = false;
+    let mut reconnect_remaining = 0u8;
     loop {
-        output.debug("Scanning for Index");
-        let device = ble
-            .request(json!({"type":"find","address":address}), args.timeout)
-            .await?;
+        let direct = reconnect_remaining > 0;
+        let device = if direct {
+            reconnect_remaining -= 1;
+            output.debug(format!("Direct reconnect to known Index; attempts_left={reconnect_remaining}; resume_collection={:?}", received.next));
+            // Do not reuse cached manufacturer data as a fresh button edge.
+            json!({"address":address})
+        } else {
+            output.debug("Scanning for Index");
+            ble.request(json!({"type":"find","address":address}), args.timeout).await?
+        };
         if device.is_null() {
             if fetch {
                 bail!("Index not advertising; press ring button");
@@ -230,7 +237,9 @@ async fn receive(
             ble.connect(
                 &address,
                 pair,
-                if pair {
+                if direct {
+                    args.timeout.min(5.0)
+                } else if pair {
                     args.timeout
                 } else {
                     args.timeout.min(8.0)
@@ -243,6 +252,7 @@ async fn receive(
                 started.elapsed().as_secs_f64()
             ));
             ble.subscribe(args.timeout).await?;
+            reconnect_remaining = 3;
             download(&mut ble, &mut received, &args, &output, fetch).await
         }
         .await;
