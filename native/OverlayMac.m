@@ -44,7 +44,7 @@ static void pinContents(CALayer *layer) {
 }
 bool index_reduce_motion(void) { return NSWorkspace.sharedWorkspace.accessibilityDisplayShouldReduceMotion; }
 bool index_panel_visible(void) { return panel.isVisible && panel.alphaValue > 0; }
-static id outsideMonitor, localMonitor;
+static id outsideMonitor, localMonitor, inputSourceMonitor;
 static NSStatusItem *status;
 static void (*actionCallback)(int);
 
@@ -64,7 +64,8 @@ void index_panel_setup(void *view, void (*callback)(int)) {
     actionCallback = callback;
     dispatch_async(dispatch_get_main_queue(), ^{
     [NSApp setActivationPolicy:NSApplicationActivationPolicyAccessory];
-    panel.level = NSScreenSaverWindowLevel;
+    // Stay above application windows but below system IME candidate panels.
+    panel.level = NSFloatingWindowLevel;
     panel.collectionBehavior = NSWindowCollectionBehaviorCanJoinAllSpaces |
         NSWindowCollectionBehaviorCanJoinAllApplications |
         NSWindowCollectionBehaviorFullScreenAuxiliary |
@@ -111,6 +112,14 @@ void index_panel_setup(void *view, void (*callback)(int)) {
     };
     outsideMonitor = [NSEvent addGlobalMonitorForEventsMatchingMask:NSEventMaskLeftMouseDown | NSEventMaskRightMouseDown handler:outside];
     localMonitor = [NSEvent addLocalMonitorForEventsMatchingMask:NSEventMaskLeftMouseDown | NSEventMaskRightMouseDown handler:^NSEvent *(NSEvent *event) { outside(event); return event; }];
+    // JIS Eisu/Kana keys have no printable character. Route them to AppKit
+    // before GPUI's character-based key translation can discard them.
+    inputSourceMonitor = [NSEvent addLocalMonitorForEventsMatchingMask:NSEventMaskKeyDown handler:^NSEvent *(NSEvent *event) {
+        if (event.window == panel && panel.isKeyWindow &&
+            (event.keyCode == 102 || event.keyCode == 104) &&
+            [[gpuiView inputContext] handleEvent:event]) return nil;
+        return event;
+    }];
     panel.appearance = [NSAppearance appearanceNamed:NSAppearanceNameVibrantDark];
     for (NSNumber *button in @[@(NSWindowCloseButton), @(NSWindowMiniaturizeButton), @(NSWindowZoomButton)])
         [panel standardWindowButton:button.integerValue].hidden = YES;

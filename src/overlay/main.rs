@@ -324,6 +324,12 @@ impl Overlay {
         if self.pasting {
             return;
         }
+        if self.editing.is_some() && self.input.update(cx, |input, cx| {
+            if input.marked_text_range(window, cx).is_some() {
+                input.unmark_text(window, cx);
+                true
+            } else { false }
+        }) { return; }
         if let (Some(backend), Some(item)) = (&mut self.backend, self.model.visible()) {
             let _ = backend.send(serde_json::json!({"type":"forget_target","request":item.id}));
         }
@@ -614,9 +620,10 @@ fn main() -> anyhow::Result<()> {
             if let RawWindowHandle::AppKit(handle) = HasWindowHandle::window_handle(window).unwrap().as_raw() { unsafe { index_panel_setup(handle.ns_view.as_ptr(), menu_action);  } }
             let input = cx.new(|cx| InputState::new(window, cx).multi_line(true).rows(1));
             let view = cx.new(|cx| {
-                let subscription = cx.subscribe_in(&input, window, |this: &mut Overlay, input, event, _, cx| {
+                let subscription = cx.subscribe_in(&input, window, |this: &mut Overlay, input, event, window, cx| {
                     if matches!(event, InputEvent::Change | InputEvent::PressEnter { .. }) {
-                        if let Some(id) = this.editing { this.model.edit(id, input.read(cx).value().to_string()); this.save_history(); }
+                        if let Some(id) = this.editing { this.model.edit(id, input.read(cx).value().to_string());
+                            if !input.update(cx, |input, cx| input.marked_text_range(window, cx).is_some()) { this.save_history(); } }
                         cx.notify();
                     }
                 });
