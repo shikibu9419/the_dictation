@@ -29,6 +29,9 @@ impl Recordings {
     }
     pub fn add(&mut self, index: u16, raw: &[u8], output: &Output) -> Result<Vec<Part>> {
         let item = decode(raw)?;
+        let records = crate::collection::records(raw)?;
+        let header = |id| records.get(&id).map(|bytes| bytes.iter().map(|b| format!("{b:02x}")).collect::<String>());
+        output.debug(format!("Collection boundary evidence index={index}: metadata82={:?} button_sequence83={:?} lifetime_count84={:?}; button sequence is stored metadata, not a physical key edge", header(82), header(83), header(84)));
         output.debug(format!(
             "collection={index} bytes={} multipart={} final={} recording_start={:?}",
             raw.len(),
