@@ -289,7 +289,19 @@ JSONLは16MiB/行。診断ログは256KiBずつ分けて読み、長いログを
 
 `tests/ipc_limits.rs` とIPC/helper単体テストは、キュー満杯、ACK監視、途中行のキャンセル、改行のない巨大入力、1フレームを超えるファイルの全バイト到達を確認する。GUIのイベントキュー・webhookの受付キューは今回のIPC変更対象外で、受入条件監査で別途扱う。
 
-残るのは受入条件全体の監査である。実機の接続維持・復帰時間・電池消費の測定、既存UIの起動や再起動は行っていない。
+受入監査で、R.startの前へ消えたCが解析watermarkを止め、後続のSingle待機が解除されなくなる経路を修正した。検証済みCの取得位置とsourceの連続PCM位置を分け、明示した欠落より先のイベントは処理する。欠落したsourceはfailedのまま保持し、全文認識へ成功として送らない。起動前sourceを読み飛ばした場合も解析watermarkに穴を残さない。通常の順不同Cは欠番が届くまで待つ。
+
+### 受入監査メモ（実装継続中）
+
+| 範囲 | 確認済みの根拠 | 残る確認 |
+| --- | --- | --- |
+| 第1〜4節の50ms・short/long・結合・表示世代 | `session_state_tests.rs`、純粋な表示モデル、合成TLVのIPC | ファームウェアの83 reset・飽和条件は未確定。対応不明を新しい押下と断定しない |
+| PCMの保持・欠番・live cursor・全文範囲 | `recordings.rs`、`input_effects.rs`、`pcm.rs`、`reception_pipeline.rs` | リングのcounter巻き戻り／リセット時の扱いと、復旧不能sourceの後続Cを監査する |
+| S/R/C・接続期間・広告ヒント | 合成時計のscheduler/connectionテスト、Swift広告フィルターテスト | Bluetooth helper起動時の電源OFF・helperプロセス終了の復旧経路を監査する |
+| Qwen native・有限窓・停止ACK・再送 | 固定重みの数値比較、実モデル比較、live/batch障害注入 | 実際のBLE・UIを含む総遅延は未測定 |
+| IPC上限・部分行・ファイル分割 | `ipc.rs`、helper単体、`ipc_limits.rs` | GUI/Webhookの従来キューは変更対象外。正常EOFの終了順序を監査する |
+
+この時点の画面なしテストは215件通過、4件は通常実行ではignored。実Qwenの独立したlive/batch復旧テストを別途1件実行して通過。Clippyは警告なし。実機の接続維持・復帰時間・電池消費の測定、既存UIの起動や再起動は行っていない。
 
 状態機械の観測列テストは `src/reception/session_state_tests.rs` に置く。UIなしで再実行する場合は `cargo test --release --lib reception::`。Esc・編集・履歴を扱う既存表示モデルの確認は `cargo test --release --bin index-voice` の純粋なモデルテストを使い、ウィンドウは生成しない。
 

@@ -84,6 +84,13 @@ impl IndexInput {
         self.time = time;
         Ok(())
     }
+    fn advance_parsed(&mut self, floor: u64) {
+        self.unread = self.unread.max(floor);
+        self.parsed.retain(|index| *index >= self.unread);
+        while self.parsed.remove(&self.unread) {
+            self.unread += 1;
+        }
+    }
 }
 impl InputAdapter for IndexInput {
     fn decode(&mut self, message: Value, output: &Output) -> Result<Vec<InputEvent>> {
@@ -171,6 +178,10 @@ impl InputAdapter for IndexInput {
                         vec![InputEvent::Discard(key)]
                     });
                 }
+                // Missing collections before R.start can no longer arrive.
+                // Loss is reported above; it must not hold every later tap's
+                // metadata watermark forever. This does not complete any PCM.
+                self.advance_parsed(self.recordings.position(start));
                 if self.save_cursor {
                     events.extend(self.observe(
                         Observation::Watermark {
@@ -192,6 +203,13 @@ impl InputAdapter for IndexInput {
                 let raw =
                     STANDARD.decode(message["raw"].as_str().context("Missing raw collection")?)?;
                 let parts = self.recordings.add(index, &raw, output)?;
+                // The raw C was validated even if it was a retired/pre-start
+                // source or awaits a gap in its source. Earlier missing C still
+                // hold unread back until received or explicitly evicted by R.
+                let position = self.recordings.position(index);
+                if position >= self.unread {
+                    self.parsed.insert(position);
+                }
                 let mut updates = std::collections::BTreeMap::new();
                 for part in parts {
                     if !self.save_cursor {
@@ -243,9 +261,7 @@ impl InputAdapter for IndexInput {
                         });
                     }
                 }
-                while self.parsed.remove(&self.unread) {
-                    self.unread += 1;
-                }
+                self.advance_parsed(self.unread);
                 self.known_end = self.known_end.max(self.recordings.position(index) + 1);
                 if self.save_cursor {
                     events.extend(self.observe(
@@ -288,5 +304,74 @@ impl InputAdapter for IndexInput {
             }
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    fn input() -> IndexInput {
+        IndexInput::new("test-ring", true, Settings::default()).unwrap()
+    }
+    fn send(input: &mut IndexInput, mut value: Value) -> Vec<InputEvent> {
+        value["received_ms"] = json!(input.time + 1);
+        input
+            .decode(value, &Output::new(false, None).unwrap())
+            .unwrap()
+    }
+    fn chunk(index: u16, first: u32, final_part: bool) -> Value {
+        let mut raw = 13u32.to_le_bytes().to_vec();
+        raw.extend([82, 6, 0]);
+        raw.extend(first.to_le_bytes());
+        raw.extend([1, final_part as u8]);
+        json!({"type":"collection","index":index,"raw":STANDARD.encode(raw)})
+    }
+    #[test]
+    fn eviction_advances_metadata_watermark_but_keeps_the_source_failed() {
+        let mut input = input();
+        send(&mut input, json!({"type":"boundary","index":1}));
+        send(&mut input, json!({"type":"range","start":1,"end":4}));
+        send(&mut input, chunk(1, 1, false));
+        send(&mut input, chunk(3, 1, true));
+        assert_eq!(input.unread, 65538); // C2 is missing; C3 cannot overtake it.
+        let events = send(&mut input, json!({"type":"range","start":3,"end":4}));
+        assert_eq!(input.unread, 65540);
+        assert!(input.parsed.is_empty());
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, InputEvent::Reception {
+            effect: pebble_index::reception::input_effects::Effect::View(view), ..
+        } if view.failed))
+        );
+        assert!(!events.iter().any(|event| matches!(
+            event,
+            InputEvent::Reception {
+                effect: pebble_index::reception::input_effects::Effect::Batch(_),
+                ..
+            }
+        )));
+    }
+    #[test]
+    fn ignored_pre_start_audio_does_not_leave_an_unparsed_hole() {
+        let mut input = input();
+        send(&mut input, json!({"type":"boundary","index":1}));
+        send(&mut input, json!({"type":"range","start":1,"end":2}));
+        send(&mut input, chunk(1, 0, true));
+        assert_eq!(input.unread, input.known_end);
+        assert!(input.parsed.is_empty());
+    }
+    #[test]
+    fn ordinary_out_of_order_pcm_still_waits_for_the_missing_collection() {
+        let mut input = input();
+        send(&mut input, json!({"type":"boundary","index":1}));
+        send(&mut input, json!({"type":"range","start":1,"end":4}));
+        send(&mut input, chunk(3, 1, true));
+        assert_eq!(input.unread, 65537);
+        send(&mut input, chunk(1, 1, false));
+        assert_eq!(input.unread, 65538);
+        send(&mut input, chunk(2, 1, false));
+        assert_eq!(input.unread, 65540);
+        assert!(input.parsed.is_empty());
     }
 }
