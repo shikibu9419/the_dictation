@@ -275,6 +275,71 @@ fn known_unparsed_collections_freeze_tap_watermark_without_unbounded_extension()
     .unwrap();
     assert_eq!(gestures(&m.tick(60).unwrap()), [Gesture::SinglePush]);
 }
+
+#[test]
+fn state_count_hint_holds_single_until_range_and_known_metadata_arrive() {
+    let mut m = SessionState::default();
+    audio(&mut m, 0, "a", 1, Some(Press::Short), true);
+    m.observe(40, Observation::RangePending(true)).unwrap();
+    assert!(gestures(&m.tick(50).unwrap()).is_empty());
+    assert!(gestures(&m.tick(300).unwrap()).is_empty());
+    m.observe(
+        310,
+        Observation::Watermark {
+            known_end: 3,
+            processed_end: 2,
+        },
+    )
+    .unwrap();
+    m.observe(310, Observation::RangePending(false)).unwrap();
+    assert!(gestures(&m.tick(400).unwrap()).is_empty());
+    assert_eq!(
+        gestures(&audio(&mut m, 500, "b", 2, Some(Press::Short), true)),
+        [Gesture::DoublePush]
+    );
+}
+
+#[test]
+fn resolving_an_empty_hint_releases_single_and_later_hints_cannot_extend_it() {
+    let mut m = SessionState::default();
+    audio(&mut m, 0, "a", 1, Some(Press::Short), true);
+    m.observe(40, Observation::RangePending(true)).unwrap();
+    m.tick(50).unwrap();
+    m.observe(
+        100,
+        Observation::Watermark {
+            known_end: 2,
+            processed_end: 2,
+        },
+    )
+    .unwrap();
+    m.observe(100, Observation::RangePending(false)).unwrap();
+    // Both observations at the same instant precede a tick. The first resolved
+    // fence remains final even when a new count hint is received.
+    let t = m.observe(100, Observation::RangePending(true)).unwrap();
+    assert_eq!(gestures(&t), [Gesture::SinglePush]);
+    assert!(gestures(&m.tick(200).unwrap()).is_empty());
+}
+
+#[test]
+fn known_range_is_enough_and_does_not_wait_for_an_additional_refresh() {
+    let mut m = SessionState::default();
+    audio(&mut m, 0, "a", 1, Some(Press::Short), true);
+    m.observe(
+        40,
+        Observation::Watermark {
+            known_end: 3,
+            processed_end: 2,
+        },
+    )
+    .unwrap();
+    m.observe(40, Observation::RangePending(true)).unwrap();
+    m.tick(50).unwrap();
+    assert_eq!(
+        gestures(&audio(&mut m, 100, "b", 2, Some(Press::Short), true)),
+        [Gesture::DoublePush]
+    );
+}
 #[test]
 fn completed_long_without_s_gets_full_batch_without_recording_flash() {
     let mut m = SessionState::default();

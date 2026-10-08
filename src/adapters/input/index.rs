@@ -124,12 +124,20 @@ impl InputAdapter for IndexInput {
                     self.collecting = Some((active, self.time));
                 }
                 if self.initialized && self.save_cursor {
+                    if message["range_pending"] == true {
+                        events.extend(self.observe(Observation::RangePending(true), output)?);
+                    }
                     let unread = message["unread"]
                         .as_u64()
                         .map(|n| self.recordings.position(n as u16))
                         .unwrap_or(self.unread);
                     events
                         .extend(self.observe(Observation::Collecting { active, unread }, output)?);
+                }
+            }
+            "range_pending" => {
+                if self.initialized && self.save_cursor {
+                    events.extend(self.observe(Observation::RangePending(true), output)?);
                 }
             }
             "clock" => {
@@ -171,6 +179,7 @@ impl InputAdapter for IndexInput {
                         },
                         output,
                     )?);
+                    events.extend(self.observe(Observation::RangePending(false), output)?);
                 }
             }
             "collection" => {

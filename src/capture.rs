@@ -7,6 +7,7 @@ use crate::{
 };
 use anyhow::{Context, Result, bail};
 use base64::{Engine, engine::general_purpose::STANDARD};
+use pebble_index::reception::scheduler::{Decision, Request, Scheduler};
 use serde_json::{Value, json};
 use std::{
     collections::HashMap,
@@ -21,6 +22,7 @@ struct Received {
     outbound: Option<mpsc::UnboundedSender<Value>>,
     output: Output,
     collecting: Option<bool>,
+    range_end: Option<u16>,
     observation_origin: Instant,
     observation_sequence: u64,
     button_timing: crate::button_timing::ButtonTiming,
@@ -53,11 +55,19 @@ impl Received {
             }
         }
     }
+    fn millis(&self) -> u64 {
+        self.observation_origin.elapsed().as_millis() as u64
+    }
+    fn range(&mut self, start: u16, end: u16) -> Result<()> {
+        self.range_end = Some(end);
+        self.send(json!({"type":"range","start":start,"end":end}))
+    }
     fn state(&mut self, state: &RingState) -> Result<()> {
         self.button_timing
             .observe(state.in_collection_state, &self.output);
         self.send(
-            json!({"type":"button_state","pressed":state.in_collection_state,"unread":self.next}),
+            json!({"type":"button_state","pressed":state.in_collection_state,"unread":self.next,
+                "range_pending":self.range_end.is_some_and(|end| state.collection_count != end as u8)}),
         )?;
         if self.collecting != Some(state.in_collection_state) {
             self.output.debug(format!(
@@ -96,131 +106,132 @@ async fn download(
     interval: f64,
 ) -> Result<RingState> {
     let mut cached = HashMap::new();
+    let mut state_started = received.millis();
     let mut state = received.read(ble.state(args.timeout)).await?;
     received.state(&state)?;
-    let mut polled = Instant::now();
-    let (mut start, mut end) = received.read(ble.range(args.timeout)).await?;
-    let mut range_checked = Instant::now();
-    loop {
-        if !received.initialized {
-            received.next = Some(end);
-            let initial_active = state.in_collection_state;
-            let initial_count = state.collection_count;
-            state = received.read(ble.state(args.timeout)).await?;
-            received.state(&state)?;
-            let observed_active = initial_active || received.initial_count.is_some();
-            if (state.in_collection_state || observed_active) && start != end {
-                let latest = end.wrapping_sub(1);
-                let raw = received.read(ble.collection(latest, args.timeout)).await?;
-                let baseline = received.initial_count.or(if initial_active {
-                    Some(initial_count)
-                } else {
-                    None
-                });
-                let first = startup_start(
-                    start,
-                    end,
-                    metadata(&raw)?,
-                    baseline.is_some_and(|n| n != end as u8),
-                );
-                received.next = Some(first);
-                if first != end {
-                    cached.insert(latest, raw);
-                }
-            }
-            received.initialized = true;
-            received.send(json!({"type":"boundary","index":received.next.unwrap()}))?;
-            received.send(json!({"type":"range","start":start,"end":end}))?;
-            output.line("BLE接続・初期化完了。録音中ならそのまま話し続けてください。");
-            output.debug(format!("Startup flush: skipped existing collections {start}..{}; active recording preserved={}",received.next.unwrap(),received.next!=Some(end)));
-        }
-        let cursor = received
-            .next
-            .filter(|n| n.wrapping_sub(start) <= end.wrapping_sub(start))
-            .unwrap_or(start);
-        output.debug(format!(
-            "Collection range: {start}..{end}; downloading from {cursor}"
-        ));
-        for step in 0..end.wrapping_sub(cursor) {
-            let index = cursor.wrapping_add(step);
-            let began = Instant::now();
-            let raw = if let Some(raw) = cached.remove(&index) {
-                raw
-            } else {
-                received.read(ble.collection(index, args.timeout)).await?
-            };
-            output.debug(format!(
-                "collection={index} transfer took {:.3}s",
-                began.elapsed().as_secs_f64()
-            ));
-            received
-                .send(json!({"type":"collection","index":index,"raw":STANDARD.encode(&raw)}))?;
-            received.next = Some(index.wrapping_add(1));
-            // Small tap records are drained first. A state round trip between
-            // them would become an artificial inter-tap delay. For audio,
-            // continue checking release between complete protocol transactions.
-            if raw.len() > 512 && polled.elapsed() >= Duration::from_millis(100) {
-                state = received.read(ble.state(args.timeout)).await?;
-                received.state(&state)?;
-                polled = Instant::now();
-            }
-        }
+    let range_started = received.millis();
+    let (start, end) = received.read(ble.range(args.timeout)).await?;
+    if !received.initialized {
         received.next = Some(end);
-        received.send(json!({"type":"range","start":start,"end":end}))?;
-        // Immediately drain anything that appeared during the previous read.
-        // Do not insert a state read or fixed sleep between queued tap records.
-        if cursor != end {
-            let (new_start, new_end) = received.read(ble.range(args.timeout)).await?;
-            range_checked = Instant::now();
-            start = new_start;
-            if new_end != end {
-                output.debug(format!(
-                    "Range advanced during transfer: {end} -> {new_end}; keep downloading"
-                ));
-                end = new_end;
-                received.send(json!({"type":"range","start":start,"end":end}))?;
-                continue;
+        let initial_active = state.in_collection_state;
+        let initial_count = state.collection_count;
+        state_started = received.millis();
+        state = received.read(ble.state(args.timeout)).await?;
+        received.state(&state)?;
+        let observed_active = initial_active || received.initial_count.is_some();
+        if (state.in_collection_state || observed_active) && start != end {
+            let latest = end.wrapping_sub(1);
+            let raw = received.read(ble.collection(latest, args.timeout)).await?;
+            let baseline = received.initial_count.or(if initial_active {
+                Some(initial_count)
+            } else {
+                None
+            });
+            let first = startup_start(
+                start,
+                end,
+                metadata(&raw)?,
+                baseline.is_some_and(|n| n != end as u8),
+            );
+            received.next = Some(first);
+            if first != end {
+                cached.insert(latest, raw);
             }
         }
-        // Idle waits consist of state reads. The state includes the low byte of
-        // collection count, so an unchanged count doesn't need a range read.
-        // Refresh the full range periodically to catch wraparound/reset.
-        loop {
-            let cycle = Instant::now();
-            state = received.read(ble.state(args.timeout)).await?;
-            received.state(&state)?;
-            polled = Instant::now();
-            if state.collection_count != end as u8
-                || range_checked.elapsed() >= Duration::from_secs(1)
-                || fetch
-            {
-                let (new_start, new_end) = received.read(ble.range(args.timeout)).await?;
-                range_checked = Instant::now();
-                start = new_start;
-                if new_end != end {
-                    end = new_end;
-                    received.send(json!({"type":"range","start":start,"end":end}))?;
-                    break;
-                }
-            }
+        received.initialized = true;
+        received.send(json!({"type":"boundary","index":received.next.unwrap()}))?;
+        output.line("BLE接続・初期化完了。録音中ならそのまま話し続けてください。");
+        output.debug(format!("Startup flush: skipped existing collections {start}..{}; active recording preserved={}",received.next.unwrap(),received.next!=Some(end)));
+    }
+    received.range(start, end)?;
+    // This initial R may precede the second startup S. Preserve its count hint
+    // without guessing a full counter value from eight bits.
+    if state.collection_count != end as u8 {
+        received.send(json!({"type":"range_pending"}))?;
+    }
+    let mut scheduler = Scheduler::new(
+        (interval * 1_000.).ceil().max(1.) as u64,
+        state_started,
+        range_started,
+        start,
+        end,
+        received.next.unwrap_or(start),
+        state.collection_count,
+    )?;
+    received.next = Some(scheduler.cursor());
+    let mut caught_up = false;
+    loop {
+        if scheduler.caught_up() {
             if fetch && !state.in_collection_state {
                 return Ok(state);
             }
-            received.send(json!({"type":"caught_up"}))?;
-            // --interval is start-to-start cadence, not extra latency appended
-            // to every BLE response. Normally the response already exceeds it.
-            let remaining = Duration::from_secs_f64(interval).saturating_sub(cycle.elapsed());
-            if !remaining.is_zero() {
+            if !caught_up {
+                received.send(json!({"type":"caught_up"}))?;
+                caught_up = true;
+            }
+        } else {
+            caught_up = false;
+        }
+        let decision = scheduler.next(received.millis())?;
+        let (request, lateness) = match decision {
+            Decision::WaitUntil(deadline) => {
+                let delay = deadline.saturating_sub(received.millis());
                 received
                     .read(async {
-                        tokio::time::sleep(remaining).await;
+                        tokio::time::sleep(Duration::from_millis(delay)).await;
                         Ok(())
                     })
                     .await?;
+                continue;
+            }
+            Decision::Read {
+                request,
+                deadline_lateness_ms,
+            } => (request, deadline_lateness_ms),
+        };
+        output.debug(format!(
+            "BLE schedule request={request:?} deadline_lateness_ms={lateness} next_collection={:?}",
+            received.next
+        ));
+        match request {
+            Request::State => {
+                state = received.read(ble.state(args.timeout)).await?;
+                scheduler.state(state.collection_count, received.millis())?;
+                received.state(&state)?;
+            }
+            Request::Range => {
+                let (start, end) = received.read(ble.range(args.timeout)).await?;
+                scheduler.range(start, end)?;
+                received.range(start, end)?;
+                received.next = Some(scheduler.cursor());
+                output.debug(format!(
+                    "Collection range: {start}..{end}; downloading from {}",
+                    scheduler.cursor()
+                ));
+                cached.retain(|index, _| index.wrapping_sub(start) < end.wrapping_sub(start));
+            }
+            Request::Collection(index) => {
+                let began = Instant::now();
+                let raw = if let Some(raw) = cached.remove(&index) {
+                    raw
+                } else {
+                    received.read(ble.collection(index, args.timeout)).await?
+                };
+                // Deliver every C immediately, independent of S deadlines and
+                // recognition work. Do not batch small records or delay meters.
+                received
+                    .send(json!({"type":"collection","index":index,"raw":STANDARD.encode(&raw)}))?;
+                scheduler.collection(index)?;
+                received.next = Some(scheduler.cursor());
+                output.debug(format!(
+                    "collection={index} transfer took {:.3}s",
+                    began.elapsed().as_secs_f64()
+                ));
             }
         }
     }
 }
+
 async fn receive(
     args: Listen,
     address: String,
@@ -247,6 +258,7 @@ async fn receive(
         outbound,
         output: output.clone(),
         collecting: None,
+        range_end: None,
         observation_origin: Instant::now(),
         observation_sequence: 0,
         button_timing: Default::default(),
@@ -402,6 +414,7 @@ mod gui_tests {
             outbound: Some(tx),
             output: Output::new(false, None).unwrap(),
             collecting: None,
+            range_end: None,
             observation_origin: Instant::now(),
             observation_sequence: 0,
             button_timing: Default::default(),
@@ -445,6 +458,7 @@ mod gui_tests {
             outbound: Some(tx),
             output,
             collecting: None,
+            range_end: None,
             observation_origin: Instant::now(),
             observation_sequence: 0,
             button_timing: Default::default(),

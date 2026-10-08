@@ -287,6 +287,34 @@ async fn known_unparsed_tap_is_classified_before_the_single_timer_fires() {
 }
 
 #[tokio::test]
+async fn count_hint_before_a_slow_range_read_preserves_the_double_tap() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut w = Worker::new(dir.path(), true).await;
+    w.send(10, collection(1, 1, true, 4, 0, 1)).await;
+    w.send(
+        30,
+        json!({"type":"button_state","pressed":false,"unread":2,"range_pending":true}),
+    )
+    .await;
+    w.send(60, json!({"type":"clock"})).await;
+    w.send(250, json!({"type":"range","start":1,"end":3})).await;
+    w.send(300, collection(2, 2, true, 4, 0, 2)).await;
+    assert_eq!(
+        w.until(|v| v["type"] == "gesture").await["gesture"],
+        "double_tap"
+    );
+    w.send(400, json!({"type":"clock"})).await;
+    w.send(401, json!({"type":"flush"})).await;
+    w.until(|v| v["type"] == "flushed").await;
+    assert_eq!(
+        w.events.iter().filter(|v| v["type"] == "gesture").count(),
+        1
+    );
+    assert!(batch_sizes(dir.path()).is_empty());
+    w.close().await;
+}
+
+#[tokio::test]
 async fn a_gap_before_short_final_is_drained_before_the_source_is_retired() {
     let dir = tempfile::tempdir().unwrap();
     let mut w = Worker::new(dir.path(), true).await;

@@ -4,7 +4,7 @@
 
 | 層 | 実装 | 所有するもの |
 | --- | --- | --- |
-| BLE取得 | `capture.rs / bluetooth.rs` | S/R/C要求、取得時刻とsequence、同じFIFOへ送るclock |
+| BLE取得 | `capture.rs / bluetooth.rs / reception/scheduler.rs` | S/R/C要求選択、取得時刻とsequence、同じFIFOへ送るclock |
 | 音声ストア | `recordings.rs / pcm.rs` | source ID、不変PCM、連続して取得済みの範囲、欠番とfinal |
 | 正規化 | `reception/button_detector.rs` | 83の既出prefix、新規short/long、判定根拠 |
 | 状態遷移 | `reception/session_state.rs` | sourceの所属、候補、UI/再開/タップ期限、snapshot |
@@ -29,7 +29,7 @@ falseまたは対応するfinalで終了猶予（初期値50ms）を始める。
 
 83のshortと、そのsourceのfinalを確認してからSingle待ち（初期値50ms）へ進む。次もshortならDouble、次のtrueを期限内に観測した場合は後続の分類までSingleを保留する。後続がlongならSingle→録音、shortならDouble。
 
-期限内に次のCが既知で未解析なら、その時点の取得範囲を固定して待つ。後から増えた別のCで待機を延長しない。3回はDouble+Single、4回はDouble+Double。確定したタップはフックに一度だけ渡し、空の認識結果や履歴を作らない。
+期限内に次のCが既知で未解析なら、その時点の取得範囲を固定して待つ。Sの低8bit件数の変化だけが先に分かった場合は、Rの応答で範囲を確定してから、その範囲のCを待つ。8bitから16bitの件数を推測しない。後から増えた別のCで待機を延長しない。3回はDouble+Single、4回はDouble+Double。確定したタップはフックに一度だけ渡し、空の認識結果や履歴を作らない。
 
 83の履歴resetや曖昧な対応を、音声長・末尾bit・物理押下時間の推定で補わない。分類できない完成音声は理由をログに残し、独立した全文認識へ渡す。
 
@@ -48,9 +48,11 @@ falseまたは対応するfinalで終了猶予（初期値50ms）を始める。
 
 `Reception observation / snapshot / action`、`Button history`、`PCM store`、`live PCM / whole PCM` を `--log` に記録する。`button_timing` はS観測の診断であり、物理エッジの復元やジェスチャ分類には使わない。
 
-## 残っている受信スケジューラーの変更
+## 受信スケジューラー
 
-現在は待機中のS周期を設定から読み、音声Cの転送中は約100msごとに完了済みREADの後でSを読む。小さなCを先に回収する分岐と定期Rも残る。これを単一のS/R/C選択器へ置き換え、要求数・期限超過・接続維持時間を記録する作業は継続中。
+`reception/scheduler.rs` が一度に一つのREADを選ぶ。Sは設定された開始周期、Cは既知の未取得番号順、Rは件数変化・回収完了・1秒の周回確認をまとめる。Cの長さによる分岐と固定sleepは削除した。状態期限を過ぎたら進行中のREAD完了後にSを行う。S自体が周期を超える場合はR/Cも一件進め、遅いRが続く場合も既知のCを一件進める。遅れた周期を取り戻す連続要求は作らない。
+
+音声Cは受信直後に配送する。`BLE schedule` は要求と期限超過、`BLE read totals` はS/R/C別の累積要求数・失敗数・通信時間・応答バイト数を60秒ごとと切断時に残す。接続継続時間も切断時に記録する。電池残量を読む命令はこの実装では未確認のため、消費率を推定した数値は表示しない。実機の電池推移の測定は未実施。
 
 接続の「未操作1時間 / 通信障害1分で広告待ち」、ASRワーカー異常時の再起動・PCM再送も未完了。受入条件は [BLE受信設計](ble-reception-design.md)、プロトコル根拠は [解析記録](ble-protocol-findings.md) を参照。
 

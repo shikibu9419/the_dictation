@@ -110,6 +110,52 @@ pub struct Bluetooth {
     pub connected: bool,
     auxiliary_subscribed: bool,
     output: Output,
+    metrics: ReadMetrics,
+    connected_since: Option<Instant>,
+}
+
+struct ReadMetrics {
+    origin: Instant,
+    reported: Instant,
+    attempts: [u64; 4], // S, R, C, other. Include failed attempts.
+    errors: [u64; 4],
+    elapsed_ms: [f64; 4],
+    bytes: u64,
+}
+impl Default for ReadMetrics {
+    fn default() -> Self {
+        Self {
+            origin: Instant::now(),
+            reported: Instant::now(),
+            attempts: [0; 4],
+            errors: [0; 4],
+            elapsed_ms: [0.; 4],
+            bytes: 0,
+        }
+    }
+}
+impl ReadMetrics {
+    fn record(&mut self, address: u32, elapsed: Duration, result: &Result<Vec<u8>>) {
+        let kind = match address {
+            0x4003000e => 0,
+            0x40030005 => 1,
+            n if n & 0xffff0000 == 0x40020000 => 2,
+            _ => 3,
+        };
+        self.attempts[kind] += 1;
+        self.errors[kind] += u64::from(result.is_err());
+        self.elapsed_ms[kind] += elapsed.as_secs_f64() * 1_000.;
+        self.bytes += result.as_ref().map_or(0, |bytes| bytes.len() as u64);
+    }
+    fn report(&mut self, output: &Output, force: bool) {
+        if force || self.reported.elapsed() >= Duration::from_secs(60) {
+            output.debug(format!(
+                "BLE read totals elapsed_s={:.1} requests_S_R_C_other={:?} errors_S_R_C_other={:?} duration_ms_S_R_C_other={:?} response_bytes={}",
+                self.origin.elapsed().as_secs_f64(), self.attempts, self.errors, self.elapsed_ms, self.bytes,
+            ));
+            self.reported = Instant::now();
+        }
+    }
 }
 impl Bluetooth {
     pub async fn start(output: Output) -> Result<Self> {
@@ -133,6 +179,8 @@ impl Bluetooth {
             connected: false,
             auxiliary_subscribed: false,
             output,
+            metrics: ReadMetrics::default(),
+            connected_since: None,
         })
     }
     fn observe(&mut self, event: &Value) {
@@ -195,6 +243,7 @@ impl Bluetooth {
                 self.request(json!({"type":"connect","address":address}), seconds)
                     .await?;
                 self.connected = true;
+                self.connected_since = Some(Instant::now());
                 if pair {
                     self.request(
                         json!({"type":"write","uuid":DATA,"data":"AA==","response":true}),
@@ -225,6 +274,13 @@ impl Bluetooth {
         }
         self.connected = false;
         self.pending.clear();
+        if let Some(since) = self.connected_since.take() {
+            self.output.debug(format!(
+                "BLE connection duration_s={:.3}",
+                since.elapsed().as_secs_f64()
+            ));
+        }
+        self.metrics.report(&self.output, true);
     }
     pub async fn subscribe(&mut self, seconds: f64) -> Result<()> {
         for uuid in [CONTROL, DATA] {
@@ -312,7 +368,16 @@ impl Bluetooth {
                 response.add(event["uuid"].as_str().unwrap_or(""),&bytes)?;
             }
         }).await;
-        result.with_context(||format!("Telesto read stalled address=0x{address:08x} control_bytes={} data_bytes={} connected={}",response.control.len(),response.data.len(),self.connected))?
+        let result = result.with_context(||format!("Telesto read stalled address=0x{address:08x} control_bytes={} data_bytes={} connected={}",response.control.len(),response.data.len(),self.connected)).and_then(|r| r);
+        self.metrics.record(address, started.elapsed(), &result);
+        self.metrics.report(&self.output, false);
+        if let Err(error) = &result {
+            self.output.debug(format!(
+                "BLE read failed address=0x{address:08x} elapsed_ms={:.1} error={error:#}",
+                started.elapsed().as_secs_f64() * 1_000.
+            ));
+        }
+        result
     }
     pub async fn state(&mut self, seconds: f64) -> Result<RingState> {
         let data = self.read(0x4003000e, 10, seconds).await?;
@@ -346,6 +411,21 @@ impl Bluetooth {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn request_metrics_include_failed_reads_and_keep_s_r_c_separate() {
+        let mut metrics = ReadMetrics::default();
+        metrics.record(0x4003000e, Duration::from_millis(10), &Ok(vec![0; 10]));
+        metrics.record(0x40030005, Duration::from_millis(20), &Ok(vec![0; 4]));
+        metrics.record(
+            0x4002ffff,
+            Duration::from_millis(30),
+            &Err(anyhow::anyhow!("disconnected")),
+        );
+        assert_eq!(metrics.attempts, [1, 1, 1, 0]);
+        assert_eq!(metrics.errors, [0, 0, 1, 0]);
+        assert_eq!(metrics.elapsed_ms, [10., 20., 30., 0.]);
+        assert_eq!(metrics.bytes, 14);
+    }
     fn header(size: u32) -> Vec<u8> {
         [0u32.to_le_bytes(), 0u32.to_le_bytes(), size.to_le_bytes()].concat()
     }

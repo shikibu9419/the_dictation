@@ -81,6 +81,10 @@ pub enum Observation {
         known_end: u64,
         processed_end: u64,
     },
+    /// S's low-byte count changed, but the full R response is not available.
+    /// A false observation follows Watermark from that R. Never infer a full
+    /// range (or a gesture) from the low-byte count alone.
+    RangePending(bool),
     Connected(bool),
     Recognized(SessionId),
     Lost(SourceId),
@@ -140,6 +144,7 @@ struct Tap {
     deadline: u64,
     // Fixed at the first deadline check. Later arrivals cannot extend this fence.
     watermark: Option<u64>,
+    waiting_for_range: bool,
 }
 impl Tap {
     fn accepts(&self, now: u64, collection: Option<u64>) -> bool {
@@ -195,6 +200,7 @@ pub struct SessionState {
     now: u64,
     known_end: u64,
     processed_end: u64,
+    range_pending: bool,
 }
 impl Default for SessionState {
     fn default() -> Self {
@@ -218,6 +224,7 @@ impl SessionState {
             now: 0,
             known_end: 0,
             processed_end: 0,
+            range_pending: false,
         })
     }
     pub fn configure(&mut self, defaults: Reception) -> Result<()> {
@@ -248,6 +255,17 @@ impl SessionState {
                 );
                 self.known_end = self.known_end.max(known_end);
                 self.processed_end = self.processed_end.max(processed_end);
+            }
+            Observation::RangePending(pending) => {
+                self.range_pending = pending;
+                if !pending
+                    && let Some(tap) = &mut self.pending_tap
+                    && tap.waiting_for_range
+                {
+                    // Freeze once. A later S/R cannot keep extending this tap.
+                    tap.waiting_for_range = false;
+                    tap.watermark = Some(self.known_end);
+                }
             }
             Observation::Connected(connected) => self.connected = connected,
             Observation::Recognized(id) => self.retire(id, &mut actions),
@@ -608,6 +626,7 @@ impl SessionState {
                 last,
                 deadline: now.saturating_add(grace),
                 watermark: None,
+                waiting_for_range: false,
             };
             if let Some(child) = already_resumed {
                 // S for the next operation can arrive before the first short's
@@ -637,13 +656,17 @@ impl SessionState {
         if let Some(tap) = &mut self.pending_tap
             && due(tap.deadline)
         {
-            if tap.watermark.is_none()
+            if !tap.waiting_for_range
+                && tap.watermark.is_none()
                 && self.known_end > self.processed_end
                 && self.known_end > tap.last.saturating_add(1)
             {
                 tap.watermark = Some(self.known_end);
             }
-            if tap.watermark.is_none_or(|end| self.processed_end >= end) {
+            if tap.watermark.is_none() && self.range_pending {
+                tap.waiting_for_range = true;
+            }
+            if !tap.waiting_for_range && tap.watermark.is_none_or(|end| self.processed_end >= end) {
                 let tap = self.pending_tap.take().unwrap();
                 self.emit_gesture(Gesture::SinglePush, tap.first, tap.last, actions);
             }

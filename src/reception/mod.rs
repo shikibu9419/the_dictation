@@ -3,6 +3,7 @@
 pub mod button_detector;
 pub mod config;
 pub mod input_effects;
+pub mod scheduler;
 pub mod session_state;
 #[cfg(test)]
 mod session_state_tests;
