@@ -1,76 +1,61 @@
-# デスクトップの録音・表示状態
+# デスクトップの受信・録音状態
 
 ## 責務
 
-- `capture.rs`: BLEの観測値を通知。解放は250msの安定確認後に通知する。音声の転送完了とは独立。
-- `gestures.rs`: 短押しの連打判定とフック。未分類の次の押下がある間は単押しを確定しない。
-- `continuation.rs`: 音声の連結とEOF。500ms以内の押し直しを同じ録音IDへまとめ、最終チャンクまでPCMを保持する。画面の録音状態を決めない。
-- `interaction.rs`: デスクトップの状態を所有し、録音ID付きの `Activity` を出力する。未確定の押下・空音声を画面へ流さない。
-- `recognition.rs`: `Activity` を画面へ転送。解放確認済みの録音について音声EOFで全文認識を開始する。切断中止時はPCMを破棄し、認識しない。
-- `overlay/model.rs`: 同じ録音IDの表示項目を更新する。再開時も新しい仮項目を作らず、完了済み・閉じた項目を遅延通知で復活させない。
-- `overlay/presentation.rs`: 設定と項目フェーズから円形／文字表示を決定する。
+| 層 | 実装 | 所有するもの |
+| --- | --- | --- |
+| BLE取得 | `capture.rs / bluetooth.rs` | S/R/C要求、取得時刻とsequence、同じFIFOへ送るclock |
+| 音声ストア | `recordings.rs / pcm.rs` | source ID、不変PCM、連続して取得済みの範囲、欠番とfinal |
+| 正規化 | `reception/button_detector.rs` | 83の既出prefix、新規short/long、判定根拠 |
+| 状態遷移 | `reception/session_state.rs` | sourceの所属、候補、UI/再開/タップ期限、snapshot |
+| 音声投入計画 | `reception/input_effects.rs` | live cursor、共有PCMへの範囲参照、全文ジョブ、世代 |
+| 入力アダプター | `adapters/input/index.rs / interaction.rs` | 上記の接続、source解放のACK、割当フック |
+| 認識制御 | `recognition.rs` | live/batch、録音IDごとの表示許可・世代照合 |
+| 表示 | `overlay/model.rs` | ID付き進捗、編集・非表示・履歴。独自の押下タイマーは持たない |
 
-## トリガと状態遷移
+`gesture_types.rs` はフックに渡す値、`gestures.rs` は動作の割当口。音声やモデルに依存しない。
 
-| 入力 | 状態・効果 |
-| --- | --- |
-| 押下候補 | Idleのまま。まだ表示しない |
-| 150msの長押し＋実音声、または150ms分の音声 | Recording。ID付きで一度だけ開始通知 |
-| 短押し確定 | Idleのまま。500msの連打判定後にジェスチャの割当操作 |
-| 安定した解放通知 | Dictating。画面はReceivingになり、赤い録音表示を停止 |
-| 500ms以内の再押下、同じ録音が未完了 | 同じIDでRecordingへ戻る |
-| 遅延した音声チャンク | PCMを追加。解放済みならRecordingへ戻らない |
-| 最終チャンクと連結猶予の終了 | 解放確認済みならDictating／Finalizing。押下中ならEOFを保留 |
-| 認識完了 | 他に処理中録音がなければIdle。画面はReady、表示設定に従う |
-| BLE切断 | Error／Reconnectingで5秒待機し、録音を中止してIdleへ。全文認識しない |
-| 再接続・残データ到着 | 中断した録音は読み捨てる。新たな押下を観測するまで新規録音を開始しない |
+## 観測から録音へ
 
-Dictatingは「残りの音声を受信中」と「認識中」の両方を含む。UIではReceivingとFinalizingで区別する。接続の復旧だけではRecordingへ戻さない。
+Sの `in_collection_state=true` で候補を作る。音声はsourceごとのストアへ保持し、表示待ち（初期値50ms）を過ぎても収集中ならrecording表示を出す。50ms経過はファームウェアのlong確定を意味しない。
 
-## 表示の順序
+falseまたは対応するfinalで終了猶予（初期値50ms）を始める。同じ終了情報で期限を延長しない。猶予後はdictatingへ移り、新しいlive入力を止めるが、音声回収は続ける。所属する全sourceのfinalと欠番なしを確認して全文認識を開始する。
 
-`update_panel` が現在のモデルから表示形式・サイズを計算し、ネイティブのサイズ変更を先にキューへ入れる。非表示ウィンドウではmacOSの描画タイマーが停止するため、ネイティブのレイヤー描画を明示要求する。GPUIのフレームコールバックからネイティブの表示処理をキューへ入れ、描画処理が戻ってから表示する。コールバックは更新番号を照合し、閉じる操作・別の項目・設定変更で古くなった表示要求を捨てる。`render` からウィンドウを表示・リサイズしない。
+未完了の同じsourceが再び収集中なら同じ録音へ戻る。別のfinal済みsourceとの結合は、猶予内の再開かつlong同士と確認した場合のみ。再開候補がshortなら本文へ混ぜず、必要なら残すlongのPCMからliveを再構築する。古いsourceのfinalは新しい候補を終了させない。
 
-## 調査根拠と回帰確認
+接続状態は録音状態と別に保持する。BLE切断をfalseへ変換せず、5秒で音声を取り消さない。
 
-2026-10-08のログでは録音2351の解放を17:22:27.597に観測、17:22:29.024に切断、最終チャンクは17:22:50.578に到着していた。旧実装はEOFまで解放通知を保留していたため、約23秒間Recording表示が残った。
+## タップ
 
-このイベント順序をInteractionのヘッドレステストで再現する。現在の仕様では切断後5秒で中止すること、遅延EOFが認識に流れないこと、同じIDでの短時間再開を確認する。GUIモデルのテストではID付き開始・解放・再開・中止・完了・閉じる後の遅延通知を確認する。実機表示テストは利用者の作業を妨げるため実施しない。
+83のshortと、そのsourceのfinalを確認してからSingle待ち（初期値50ms）へ進む。次もshortならDouble、次のtrueを期限内に観測した場合は後続の分類までSingleを保留する。後続がlongならSingle→録音、shortならDouble。
 
-## Updated disconnect policy
+期限内に次のCが既知で未解析なら、その時点の取得範囲を固定して待つ。後から増えた別のCで待機を延長しない。3回はDouble+Single、4回はDouble+Double。確定したタップはフックに一度だけ渡し、空の認識結果や履歴を作らない。
 
-A disconnect is not a release. It enters Error/Reconnecting for five seconds,
-then emits Cancel and returns to Idle without batch recognition. Recovered
-chunks of the interrupted recording are discarded. A fresh press is required
-before starting another recording. EOF is held until a debounced release edge
-has been observed; EOF alone is not a dictation trigger.
+83の履歴resetや曖昧な対応を、音声長・末尾bit・物理押下時間の推定で補わない。分類できない完成音声は理由をログに残し、独立した全文認識へ渡す。
 
-The latest six nonempty recordings inspected were 2311, 2322, 2342, 2351,
-2441, and 2453. For 2453 the disconnect at 17:36:11.515 preceded the release
-observation at 17:36:29.886. The old disconnect path incorrectly emitted
-Activity(false). The new Interrupted/Cancel events are separate from Activity.
+## 音声・表示・完了
 
-With live conversion mode disabled, no phase (including Ready and errors)
-may select a Transcript surface unless the user explicitly opened history.
-Ready selects Hidden. Legacy live_text=false migrates to live_mode=false.
+- rawのTLVは一度解析し、デコード済みPCMは共有ブロックで保持する。source IDはdevice・継続世代・開始番号から作る。
+- liveは初期値200ms以上の未投入PCMだけを渡す。受信側はASR完了を待たない。全文認識には先頭と末尾の端数を含める。
+- 音量は受信PCMから通知し、ASRの結果やlive有効設定を待たない。
+- hidden候補や旧世代のpartialは表示しない。Escで閉じた項目は同じ録音の再開・partialでも勝手に再表示しない。
+- 受信プロセスがclockも順序付きで送る。IPCが滞留しても、認識側だけのwall-clockで未処理入力を追い越してSingleを発火させない。
+- 受信ストアは認識完了または確定タップの破棄ACKまで音声を保持する。容量制限・欠番喪失は明示エラーとし、成功した全文として扱わない。
 
-Button timing logs measure received collecting edges, not physical switch
-edges. The five-tap calibration must compare these observations with decoded
-sample counts and short/long metadata; missing BLE edges cannot establish
-physical tap durations.
+## 設定とログ
 
-## Five-tap calibration (2026-10-08)
+`Settings.reception` の各期限は候補開始時の値を使う。ファイル変更後は既存のreloadで反映する。省略時は表示・再開・タップが各50ms、live投入200ms、状態確認の開始間隔50ms。
 
-The user's latest five single taps are collections 2530 through 2534:
-17:37:29.676, 17:37:31.629, 17:37:33.217, 17:37:34.537,
-and 17:37:37.027. Every collection contains four PCM samples at 9997 Hz
-(0.400 ms of dummy audio) and ends in short metadata. Each generated exactly
-one SingleTap event. The cumulative short metadata counts are 1, 2, 3, 4, 5;
-these are stored history entries, not five new taps on the last collection.
+`Reception observation / snapshot / action`、`Button history`、`PCM store`、`live PCM / whole PCM` を `--log` に記録する。`button_timing` はS観測の診断であり、物理エッジの復元やジェスチャ分類には使わない。
 
-The activation threshold is reduced from 350 to 150 ms, matching the existing
-minimum useful audio duration. A typical first voice chunk of 170-330 ms can
-now activate immediately instead of waiting for another chunk. Empty taps
-still cannot activate the recording UI. Double-tap grouping remains 500 ms.
-This calibrates PCM classification against the five observations; it does not
-claim that a physical tap lasted 0.400 ms or determine physical switch timing.
+## 残っている受信スケジューラーの変更
+
+現在は待機中のS周期を設定から読み、音声Cの転送中は約100msごとに完了済みREADの後でSを読む。小さなCを先に回収する分岐と定期Rも残る。これを単一のS/R/C選択器へ置き換え、要求数・期限超過・接続維持時間を記録する作業は継続中。
+
+接続の「未操作1時間 / 通信障害1分で広告待ち」、ASRワーカー異常時の再起動・PCM再送も未完了。受入条件は [BLE受信設計](ble-reception-design.md)、プロトコル根拠は [解析記録](ble-protocol-findings.md) を参照。
+
+## 画面を出さない検証
+
+`cargo test --release --lib --bin pebble-index --bin index-voice --test adapters --test reception_pipeline`
+
+純粋な状態遷移、受信ストア、表示モデル、合成TLVからmock ASRまでのIPCを確認する。Bluetooth実機・マイク・ウィンドウ表示は実行しない。

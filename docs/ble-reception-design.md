@@ -273,7 +273,11 @@ P=50msは待機中だけで最大20回/秒・72,000回/時のS要求になる評
 - `input_effects.rs`: 状態から独立したPCM投入計画。200ms等の未投入分だけを共有参照で渡す。確定shortの除外後は投入済みの範囲を確認してliveを再構築し、全文はfinal・欠番なしを再確認して作る。
 - `src/pcm.rs`: 不変ブロックの共有と範囲参照。cursorの先頭を二分探索し、録音の先頭から毎回全ブロックを走査しない。
 
-**これは新しい経路の構成要素であり、実アプリへの切替完了ではない。** 既存の `adapters/input` への接続、旧検出器の削除、S/R/C取得順・取得時刻の配送、認識ジョブの世代管理・障害復旧は引き続き実装する。既存UIの起動や再起動は行っていない。
+**入力経路への接続まで実装した。** `adapters/input/index.rs` と `interaction.rs` が受信ストア・状態機械・効果を接続する。旧エッジ検出器、150msでの音声破棄、5秒Cancelを削除した。受信プロセスの取得時刻・sequence・clockを同じFIFOで配送し、認識側のwall-clockで入力を追い越さない。liveジョブの世代と表示許可を録音IDごとに照合し、古いpartialを無効化する。
+
+`tests/reception_pipeline.rs` は合成リングTLVを実際の認識制御プロセスとmock ASRへ通す。連続録音、タップの再送、未解析Cを待つDouble、欠番の後に届くshort final、切断から復旧した全音声の保持を確認する。BLE・マイク・GUIを起動しない。
+
+残るのはS/R/C要求の選択、接続維持/広告待ちの方針、ASR障害時の再起動・再送である。既存UIの起動や再起動は行っていない。
 
 状態機械の観測列テストは `src/reception/session_state_tests.rs` に置く。UIなしで再実行する場合は `cargo test --release --lib reception::`。Esc・編集・履歴を扱う既存表示モデルの確認は `cargo test --release --bin index-voice` の純粋なモデルテストを使い、ウィンドウは生成しない。
 

@@ -1,4 +1,4 @@
-mod continuation;
+mod gesture_types;
 pub mod gestures;
 mod index;
 mod interaction;
@@ -11,21 +11,26 @@ use serde_json::Value;
 
 pub struct AudioChunk {
     pub key: String,
-    pub samples: Vec<i16>,
+    pub samples: crate::pcm::Pcm,
     pub rate: u32,
     pub final_part: bool,
     pub checkpoint: Option<Value>,
 }
 pub enum InputEvent {
-    Gesture(gestures::GestureEvent),
+    Gesture(gesture_types::GestureEvent),
     Audio(AudioChunk),
     State(bool),
-    Activity { key: String, collecting: bool },
+    Reception {
+        namespace: String,
+        effect: pebble_index::reception::input_effects::Effect,
+    },
+    Level {
+        key: String,
+        level: f64,
+    },
     Discard(String),
     Flush,
     Checkpoint(Value),
-    Interrupted(String),
-    Cancel(String),
 }
 
 /// Source-specific decoding and persistence stay on this side of the PCM boundary.
@@ -44,6 +49,10 @@ pub fn create(address: &str, command: &str) -> Result<Box<dyn InputAdapter>> {
     Ok(if address == "file" || address == "pcm" {
         Box::new(pcm::PcmInput)
     } else {
-        Box::new(index::IndexInput::new(address, command == "listen")?)
+        Box::new(index::IndexInput::new(
+            address,
+            command == "listen",
+            crate::settings::Settings::load()?,
+        )?)
     })
 }

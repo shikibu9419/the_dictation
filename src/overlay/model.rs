@@ -5,6 +5,7 @@ pub struct Event {
     pub r#type: String,
     pub collecting: Option<bool>,
     pub recording: Option<String>,
+    pub target_recording: Option<String>,
     pub text: Option<String>,
     pub mode: Option<String>,
     pub r#final: Option<bool>,
@@ -18,6 +19,7 @@ impl Event {
             text: Some(text.into()),
             collecting: None,
             recording: None,
+            target_recording: None,
             mode: None,
             r#final: None,
             empty: false,
@@ -88,25 +90,78 @@ impl Model {
     }
     pub fn accept(&mut self, e: Event, target: i32) {
         match e.r#type.as_str() {
+            "reception_merge" => {
+                let (Some(from), Some(into)) = (e.recording, e.target_recording) else {
+                    return;
+                };
+                let Some(from_index) = self
+                    .items
+                    .iter()
+                    .position(|i| i.recording.as_ref() == Some(&from))
+                else {
+                    return;
+                };
+                let Some(into_index) = self
+                    .items
+                    .iter()
+                    .position(|i| i.recording.as_ref() == Some(&into))
+                else {
+                    return;
+                };
+                if from_index == into_index || self.items[from_index].phase == Phase::Ready {
+                    return;
+                }
+                let from_id = self.items[from_index].id;
+                self.items[into_index].dismissed |= self.items[from_index].dismissed;
+                if self.active == Some(from_id) {
+                    self.active =
+                        (!self.items[into_index].dismissed).then_some(self.items[into_index].id);
+                }
+                self.items.remove(from_index);
+            }
             "ready" => self.ready = true,
             "interrupted" | "cancelled" => {
-                if let Some(item) = self.items.iter_mut().find(|i| i.recording == e.recording && e.recording.is_some()) {
+                if let Some(item) = self
+                    .items
+                    .iter_mut()
+                    .find(|i| i.recording == e.recording && e.recording.is_some())
+                {
                     if e.r#type == "interrupted" {
                         item.phase = Phase::Reconnecting;
                     } else {
                         item.phase = Phase::Failed;
                         item.dismissed = true;
-                        if self.active == Some(item.id) { self.active = None; }
+                        if self.active == Some(item.id) {
+                            self.active = None;
+                        }
                     }
                 }
                 self.prune();
             }
-            "activity" => {
-                let (Some(key), Some(collecting)) = (e.recording, e.collecting) else { return };
-                let phase = if collecting { Phase::Recording } else { Phase::Receiving };
-                if let Some(item) = self.items.iter_mut().find(|i| i.recording.as_ref() == Some(&key)) {
+            "activity" | "reception_activity" => {
+                let reception = e.r#type == "reception_activity";
+                let (Some(key), Some(collecting)) = (e.recording, e.collecting) else {
+                    return;
+                };
+                let phase = if collecting {
+                    Phase::Recording
+                } else if reception {
+                    Phase::Finalizing
+                } else {
+                    Phase::Receiving
+                };
+                if let Some(item) = self
+                    .items
+                    .iter_mut()
+                    .find(|i| i.recording.as_ref() == Some(&key))
+                {
                     // Late transport events cannot revive a completed/dismissed item.
-                    if matches!(item.phase, Phase::Recording | Phase::Receiving) { item.phase = phase; }
+                    if matches!(item.phase, Phase::Recording | Phase::Receiving)
+                        || reception
+                            && matches!(item.phase, Phase::Finalizing | Phase::Reconnecting)
+                    {
+                        item.phase = phase;
+                    }
                 } else {
                     self.error = None;
                     self.add(Some(key), phase, target);
@@ -121,10 +176,24 @@ impl Model {
                         self.error = None;
                         // A BLE state edge has no recording identity. Keep the
                         // current transcript until audio confirms the next one.
-                        let previous = self.visible().filter(|i| !i.text.is_empty() && matches!(i.phase, Phase::Recording | Phase::Receiving | Phase::Reconnecting | Phase::Finalizing)).map(|i| i.id);
+                        let previous = self
+                            .visible()
+                            .filter(|i| {
+                                !i.text.is_empty()
+                                    && matches!(
+                                        i.phase,
+                                        Phase::Recording
+                                            | Phase::Receiving
+                                            | Phase::Reconnecting
+                                            | Phase::Finalizing
+                                    )
+                            })
+                            .map(|i| i.id);
                         self.add(None, Phase::Recording, target);
                         self.capturing = self.active;
-                        if previous.is_some() { self.active = previous; }
+                        if previous.is_some() {
+                            self.active = previous;
+                        }
                     } else if let Some(item) =
                         self.items.iter_mut().find(|i| Some(i.id) == self.capturing)
                         && item.phase == Phase::Recording
@@ -136,7 +205,17 @@ impl Model {
             "recording" => {
                 // A tap can still yield an empty result, but must not replace
                 // another recording that is awaiting its final transcript.
-                if e.empty && self.visible().is_some_and(|i| matches!(i.phase, Phase::Recording | Phase::Receiving | Phase::Reconnecting | Phase::Finalizing)) {
+                if e.empty
+                    && self.visible().is_some_and(|i| {
+                        matches!(
+                            i.phase,
+                            Phase::Recording
+                                | Phase::Receiving
+                                | Phase::Reconnecting
+                                | Phase::Finalizing
+                        )
+                    })
+                {
                     return;
                 }
                 if let Some(key) = e.recording
@@ -145,9 +224,14 @@ impl Model {
                         .iter()
                         .any(|i| i.recording.as_ref() == Some(&key))
                 {
-                    if let Some(item) = self.items.iter_mut().find(|i| i.recording.is_none() && matches!(i.phase, Phase::Recording | Phase::Receiving)) {
+                    if let Some(item) = self.items.iter_mut().find(|i| {
+                        i.recording.is_none()
+                            && matches!(i.phase, Phase::Recording | Phase::Receiving)
+                    }) {
                         item.recording = Some(key);
-                        if !item.dismissed { self.active = Some(item.id); }
+                        if !item.dismissed {
+                            self.active = Some(item.id);
+                        }
                     } else {
                         self.add(
                             Some(key),
@@ -178,7 +262,7 @@ impl Model {
                     "finalizing" if matches!(item.phase, Phase::Recording | Phase::Receiving) => {
                         item.phase = Phase::Finalizing;
                     }
-                    "finalizing" => {},
+                    "finalizing" => {}
                     _ if e.mode.as_deref() == Some("batch") && e.r#final == Some(true) => {
                         item.phase = Phase::Ready;
                         item.text = e.text.unwrap_or_default();
@@ -191,7 +275,13 @@ impl Model {
                         item.text = e.text.unwrap_or_default()
                     }
                     _ if e.mode.as_deref() == Some("batch")
-                        && matches!(item.phase, Phase::Recording | Phase::Receiving | Phase::Reconnecting | Phase::Finalizing) =>
+                        && matches!(
+                            item.phase,
+                            Phase::Recording
+                                | Phase::Receiving
+                                | Phase::Reconnecting
+                                | Phase::Finalizing
+                        ) =>
                     {
                         item.phase = Phase::Finalizing;
                         if let Some(text) = e.text.filter(|text| !text.is_empty()) {
@@ -209,7 +299,10 @@ impl Model {
                 for item in &mut self.items {
                     if matches!(
                         item.phase,
-                        Phase::Recording | Phase::Receiving | Phase::Reconnecting | Phase::Finalizing
+                        Phase::Recording
+                            | Phase::Receiving
+                            | Phase::Reconnecting
+                            | Phase::Finalizing
                     ) {
                         item.phase = Phase::Failed;
                     }
@@ -221,7 +314,9 @@ impl Model {
     }
     pub fn dismiss(&mut self) {
         self.error = None;
-        for item in &mut self.items { item.dismissed = true; }
+        for item in &mut self.items {
+            item.dismissed = true;
+        }
         self.active = None;
         self.prune();
     }
@@ -235,21 +330,42 @@ impl Model {
         self.prune();
     }
     fn prune(&mut self) {
-        self.items
-            .retain(|i| !(i.dismissed && (i.phase == Phase::Failed || (i.phase == Phase::Ready && !i.in_history()))));
-        let mut excess = self.items.iter().filter(|i| i.in_history()).count().saturating_sub(200);
+        self.items.retain(|i| {
+            !(i.dismissed
+                && (i.phase == Phase::Failed || (i.phase == Phase::Ready && !i.in_history())))
+        });
+        let mut excess = self
+            .items
+            .iter()
+            .filter(|i| i.in_history())
+            .count()
+            .saturating_sub(200);
         self.items.retain(|i| {
             if excess > 0 && i.in_history() && Some(i.id) != self.active {
                 excess -= 1;
                 false
-            } else { true }
+            } else {
+                true
+            }
         });
     }
     pub fn history(&self) -> Vec<String> {
-        self.items.iter().filter(|i| i.in_history()).map(|i| i.text.clone()).collect()
+        self.items
+            .iter()
+            .filter(|i| i.in_history())
+            .map(|i| i.text.clone())
+            .collect()
     }
     pub fn restore_history(&mut self, texts: Vec<String>) {
-        for text in texts.into_iter().filter(|text| !text.trim().is_empty()).rev().take(200).collect::<Vec<_>>().into_iter().rev() {
+        for text in texts
+            .into_iter()
+            .filter(|text| !text.trim().is_empty())
+            .rev()
+            .take(200)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+        {
             self.add(None, Phase::Ready, 0);
             let item = self.items.last_mut().unwrap();
             item.text = text;
@@ -260,10 +376,16 @@ impl Model {
     pub fn browse(&mut self, older: bool, target: i32) -> bool {
         let current = self.active;
         let candidate = if older {
-            self.items.iter().rev().find(|i| i.in_history() && current.is_none_or(|id| i.id < id))
+            self.items
+                .iter()
+                .rev()
+                .find(|i| i.in_history() && current.is_none_or(|id| i.id < id))
         } else {
-            self.items.iter().find(|i| i.in_history() && current.is_some_and(|id| i.id > id))
-        }.map(|i| i.id);
+            self.items
+                .iter()
+                .find(|i| i.in_history() && current.is_some_and(|id| i.id > id))
+        }
+        .map(|i| i.id);
         let Some(id) = candidate else { return false };
         self.active = Some(id);
         self.history_view = true;
@@ -274,7 +396,9 @@ impl Model {
     }
     pub fn open_history(&mut self, target: i32) {
         self.active = None;
-        if !self.browse(true, target) { self.add(None, Phase::Ready, target); }
+        if !self.browse(true, target) {
+            self.add(None, Phase::Ready, target);
+        }
         self.history_view = true;
     }
     pub fn edit(&mut self, id: u64, text: String) {
@@ -315,7 +439,10 @@ mod tests {
     #[test]
     fn disconnect_wait_then_cancel_removes_processing_without_history() {
         let mut m = Model::default();
-        send(&mut m, json!({"type":"activity","recording":"lost","collecting":true}));
+        send(
+            &mut m,
+            json!({"type":"activity","recording":"lost","collecting":true}),
+        );
         send(&mut m, json!({"type":"interrupted","recording":"lost"}));
         assert_eq!(m.visible().unwrap().phase, Phase::Reconnecting);
         send(&mut m, json!({"type":"cancelled","recording":"lost"}));
@@ -329,7 +456,8 @@ mod tests {
     #[test]
     fn keyed_activity_is_atomic_and_resume_keeps_the_same_item() {
         let mut m = Model::default();
-        let activity = |collecting| json!({"type":"activity", "recording":"2351", "collecting":collecting});
+        let activity =
+            |collecting| json!({"type":"activity", "recording":"2351", "collecting":collecting});
         send(&mut m, activity(true));
         let id = m.visible().unwrap().id;
         assert_eq!(m.visible().unwrap().recording.as_deref(), Some("2351"));
@@ -489,6 +617,54 @@ mod tests {
 mod settings_switch_tests {
     use super::*;
     use serde_json::json;
+    #[test]
+    fn delayed_source_continuity_removes_the_provisional_ui_and_preserves_dismissal() {
+        for dismissed in [false, true] {
+            let mut model = Model::default();
+            let activity = |key, collecting| {
+                serde_json::from_value(
+                    json!({"type":"reception_activity","recording":key,"collecting":collecting}),
+                )
+                .unwrap()
+            };
+            model.accept(activity("one", true), 42);
+            let original = model.visible().unwrap().id;
+            model.accept(activity("one", false), 42);
+            model.accept(activity("candidate-two", true), 42);
+            if dismissed {
+                model.dismiss();
+            }
+            model.accept(activity("one", true), 42);
+            model.accept(serde_json::from_value(json!({"type":"reception_merge","recording":"candidate-two","target_recording":"one"})).unwrap(), 42);
+            assert_eq!(model.items.len(), 1);
+            assert_eq!(model.items[0].id, original);
+            assert_eq!(model.items[0].phase, Phase::Recording);
+            assert_eq!(model.visible().is_none(), dismissed);
+        }
+    }
+    #[test]
+    fn authoritative_resume_keeps_dismissal_and_old_completion_cannot_hide_new_recording() {
+        let mut model = Model::default();
+        let activity = |key, collecting| {
+            serde_json::from_value(
+                json!({"type":"reception_activity","recording":key,"collecting":collecting}),
+            )
+            .unwrap()
+        };
+        model.accept(activity("one", true), 42);
+        model.accept(activity("one", false), 42);
+        assert_eq!(model.visible().unwrap().phase, Phase::Finalizing);
+        model.accept(activity("one", true), 42);
+        assert_eq!(model.visible().unwrap().phase, Phase::Recording);
+        model.dismiss();
+        model.accept(activity("one", false), 42);
+        model.accept(activity("one", true), 42);
+        assert!(model.visible().is_none());
+        model.accept(activity("two", true), 99);
+        model.accept(serde_json::from_value(json!({"type":"text","recording":"one","mode":"batch","final":true,"text":"old recording"})).unwrap(), 42);
+        assert_eq!(model.visible().unwrap().recording.as_deref(), Some("two"));
+        assert_eq!(model.visible().unwrap().phase, Phase::Recording);
+    }
     #[test]
     fn dismissed_recording_remains_inflight_until_final() {
         let mut model = Model::default();

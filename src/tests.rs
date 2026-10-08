@@ -123,7 +123,7 @@ fn thousand_chunks_survive_retention_and_index_wrap() {
             )
             .unwrap();
         for event in events {
-            all.extend(event.samples);
+            all.extend(event.samples.iter().copied());
             assert_eq!(event.final_part, n == 999);
         }
         assert!(
@@ -144,7 +144,7 @@ fn duplicates_and_out_of_order_chunks_are_not_repeated() {
             .add(n, &collection(0, n == 3, &[n as i16]), &out)
             .unwrap()
         {
-            all.extend(part.samples);
+            all.extend(part.samples.iter().copied());
         }
     }
     assert_eq!(all, vec![0, 1, 2, 3]);
@@ -153,7 +153,7 @@ fn duplicates_and_out_of_order_chunks_are_not_repeated() {
 fn startup_boundary_skips_only_previous_recordings() {
     let out = Output::new(false, None).unwrap();
     let mut recordings = Recordings::default();
-    recordings.reset(20);
+    recordings.reset(20).unwrap();
     assert!(
         recordings
             .add(19, &collection(19, true, &[1]), &out)
@@ -164,7 +164,10 @@ fn startup_boundary_skips_only_previous_recordings() {
         recordings
             .add(20, &collection(20, true, &[2]), &out)
             .unwrap()[0]
-            .samples,
+            .samples
+            .iter()
+            .copied()
+            .collect::<Vec<_>>(),
         vec![2]
     );
 }

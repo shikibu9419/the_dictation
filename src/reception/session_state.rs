@@ -87,6 +87,10 @@ pub enum Observation {
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Action {
+    MergeSession {
+        from: SessionId,
+        into: SessionId,
+    },
     /// Exactly once, only after release grace AND all sources are complete.
     Recognize {
         session: SessionId,
@@ -269,6 +273,18 @@ impl SessionState {
     }
     pub fn snapshot(&self) -> Snapshot {
         self.transition(vec![]).snapshot
+    }
+    pub fn waiting_for_input(&self) -> bool {
+        self.pending_tap.is_some() || self.sessions.values().any(|s| !s.submitted)
+    }
+    pub fn source_session(&self, source: &str) -> Option<SessionId> {
+        let owner = self.sources.get(source)?.session;
+        Some(
+            self.sessions[&owner]
+                .resume
+                .filter(|r| r.within_grace)
+                .map_or(owner, |r| r.parent),
+        )
     }
 
     fn validate_observation(&self, observation: &Observation) -> Result<()> {
@@ -460,7 +476,7 @@ impl SessionState {
             })
             && continues_unfinished
         {
-            self.join(session_id, child);
+            self.join(session_id, child, actions);
         }
         if newly_final {
             self.sessions
@@ -508,7 +524,7 @@ impl SessionState {
                 .unwrap_or(0),
         )
     }
-    fn join(&mut self, parent: SessionId, child: SessionId) {
+    fn join(&mut self, parent: SessionId, child: SessionId, actions: &mut Vec<Action>) {
         let child = self.sessions.remove(&child).unwrap();
         for source in &child.sources {
             self.sources.get_mut(source).unwrap().session = parent;
@@ -528,6 +544,10 @@ impl SessionState {
         if self.active == Some(child.id) {
             self.active = Some(parent);
         }
+        actions.push(Action::MergeSession {
+            from: child.id,
+            into: parent,
+        });
     }
     fn emit_gesture(&mut self, gesture: Gesture, first: u64, last: u64, actions: &mut Vec<Action>) {
         self.next_gesture += 1;
@@ -651,7 +671,7 @@ impl SessionState {
                 && child_class == Some(Press::Long)
                 && parent_class == Some(Press::Long)
             {
-                self.join(resume.parent, child);
+                self.join(resume.parent, child, actions);
             } else if child_class == Some(Press::Short)
                 || self.complete(child) && child_class.is_none()
                 || !resume.within_grace && !self.sessions[&child].sources.is_empty()

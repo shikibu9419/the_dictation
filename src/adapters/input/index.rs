@@ -1,284 +1,283 @@
-use super::continuation::Continuation;
-use super::gestures::{Detector, Hooks, LogHook, Press};
-use super::interaction::Interaction;
-use super::{AudioChunk, InputAdapter, InputEvent, pcm::PcmInput};
-use crate::{config, output::Output, recordings::Recordings};
+use super::{AudioChunk, InputAdapter, InputEvent, interaction::Interaction, pcm::PcmInput};
+use crate::{config, output::Output, recordings::Recordings, settings::Settings};
 use anyhow::{Context, Result, ensure};
 use base64::{Engine, engine::general_purpose::STANDARD};
+use pebble_index::reception::{
+    button_detector::{ButtonHistory, Press, SourceClassification},
+    session_state::Observation,
+};
 use serde_json::{Value, json};
-use std::time::{Duration, Instant};
+use std::{
+    collections::{BTreeSet, HashMap},
+    time::Instant,
+};
 
 pub struct IndexInput {
     recordings: Recordings,
     interaction: Interaction,
     address: String,
     save_cursor: bool,
-    resume_grace: Duration,
-    continuation: Continuation,
-    gestures: Detector,
-    gesture_hooks: Hooks,
-    gestures_live: bool,
+    history: ButtonHistory,
+    classification: HashMap<String, SourceClassification>,
+    initialized: bool,
+    collecting: Option<(bool, u64)>,
+    unread: u64,
+    known_end: u64,
+    parsed: BTreeSet<u64>,
+    time: u64,
+    sequence: Option<u64>,
+    legacy_clock: Instant,
+    completed: Vec<String>,
+    committed: Option<u64>,
 }
 impl IndexInput {
-    pub fn new(address: &str, save_cursor: bool) -> Result<Self> {
-        let ms = std::env::var("INDEX_VOICE_RESUME_MS")
-            .unwrap_or_else(|_| "500".into())
-            .parse::<u64>()
-            .context("INDEX_VOICE_RESUME_MS must be an integer from 0 to 5000")?;
-        ensure!(ms <= 5000, "INDEX_VOICE_RESUME_MS must be from 0 to 5000");
-        let mut gesture_hooks = Hooks::default();
-        gesture_hooks.register(LogHook);
+    pub fn new(address: &str, save_cursor: bool, settings: Settings) -> Result<Self> {
         Ok(Self {
-            recordings: Recordings::default(),
-            interaction: Interaction::default(),
+            recordings: Recordings::new(address),
+            interaction: Interaction::new(&settings)?,
             address: address.into(),
             save_cursor,
-            resume_grace: Duration::from_millis(ms),
-            gestures: Detector::new(Duration::from_millis(500)),
-            gesture_hooks,
-            gestures_live: false,
-            continuation: Continuation::new(Duration::from_millis(if save_cursor {
-                ms
-            } else {
-                0
-            })),
+            history: ButtonHistory::default(),
+            classification: HashMap::new(),
+            initialized: !save_cursor,
+            collecting: None,
+            unread: 0,
+            known_end: 0,
+            parsed: BTreeSet::new(),
+            time: 0,
+            sequence: None,
+            legacy_clock: Instant::now(),
+            completed: vec![],
+            committed: None,
         })
     }
+    fn observe(&mut self, event: Observation, output: &Output) -> Result<Vec<InputEvent>> {
+        self.interaction
+            .observe(self.time, event, &mut self.recordings, output)
+    }
+    fn acknowledgements(&mut self, output: &Output) -> Result<Vec<InputEvent>> {
+        let mut events = vec![];
+        for key in std::mem::take(&mut self.completed) {
+            if let Some(id) = self.interaction.id(&key) {
+                events.extend(self.observe(Observation::Recognized(id), output)?);
+            } else if !self.save_cursor {
+                self.recordings.release(&key);
+            }
+        }
+        // Retired sources no longer need metadata-classification state.
+        self.classification
+            .retain(|key, _| self.interaction.source_session(key).is_some());
+        Ok(events)
+    }
+    fn timestamp(&mut self, message: &Value) -> Result<()> {
+        if let Some(sequence) = message["received_seq"].as_u64() {
+            ensure!(
+                self.sequence.is_none_or(|last| sequence > last),
+                "Reception sequence regressed or was replayed"
+            );
+            self.sequence = Some(sequence);
+        }
+        let time = message["received_ms"]
+            .as_u64()
+            .unwrap_or_else(|| self.legacy_clock.elapsed().as_millis() as u64);
+        ensure!(time >= self.time, "Reception timestamp regressed");
+        self.time = time;
+        Ok(())
+    }
 }
-impl IndexInput {
-    fn decode_raw(&mut self, message: Value, output: &Output) -> Result<Vec<InputEvent>> {
+impl InputAdapter for IndexInput {
+    fn decode(&mut self, message: Value, output: &Output) -> Result<Vec<InputEvent>> {
+        self.timestamp(&message)?;
+        let mut events = self.acknowledgements(output)?;
         match message["type"].as_str().context("Missing input type")? {
+            "boundary" => {
+                let index = u16::try_from(message["index"].as_u64().context("Missing boundary")?)?;
+                self.recordings.reset(index)?;
+                self.unread = self.recordings.position(index);
+                self.known_end = self.unread;
+                self.committed = Some(self.unread);
+                self.initialized = true;
+                if self.save_cursor
+                    && let Some((true, first_seen)) = self.collecting
+                {
+                    events.extend(self.interaction.observe(
+                        first_seen,
+                        Observation::Collecting {
+                            active: true,
+                            unread: self.unread,
+                        },
+                        &mut self.recordings,
+                        output,
+                    )?);
+                    events.extend(self.interaction.tick(
+                        self.time,
+                        &mut self.recordings,
+                        output,
+                    )?);
+                }
+            }
+            "button_state" => {
+                let active = message["pressed"]
+                    .as_bool()
+                    .context("Missing collecting state")?;
+                if self.collecting.is_none_or(|(old, _)| old != active) {
+                    self.collecting = Some((active, self.time));
+                }
+                if self.initialized && self.save_cursor {
+                    let unread = message["unread"]
+                        .as_u64()
+                        .map(|n| self.recordings.position(n as u16))
+                        .unwrap_or(self.unread);
+                    events
+                        .extend(self.observe(Observation::Collecting { active, unread }, output)?);
+                }
+            }
+            "clock" => {
+                if self.initialized && self.save_cursor {
+                    events.extend(self.interaction.tick(
+                        self.time,
+                        &mut self.recordings,
+                        output,
+                    )?);
+                }
+            }
+            "state" if self.save_cursor => {} // S is interpreted once, through button_state.
+            "connection_lost" | "connected" => {
+                if self.save_cursor && self.initialized {
+                    events.extend(self.observe(
+                        Observation::Connected(message["type"] == "connected"),
+                        output,
+                    )?);
+                }
+            }
+            "range" => {
+                let start =
+                    u16::try_from(message["start"].as_u64().context("Missing range start")?)?;
+                let end = u16::try_from(message["end"].as_u64().context("Missing range end")?)?;
+                let lost = self.recordings.retain(start, end, output);
+                self.known_end = self.known_end.max(self.recordings.position(end));
+                for key in lost {
+                    events.extend(if self.save_cursor {
+                        self.observe(Observation::Lost(key), output)?
+                    } else {
+                        vec![InputEvent::Discard(key)]
+                    });
+                }
+                if self.save_cursor {
+                    events.extend(self.observe(
+                        Observation::Watermark {
+                            known_end: self.known_end,
+                            processed_end: self.unread.min(self.known_end),
+                        },
+                        output,
+                    )?);
+                }
+            }
             "collection" => {
+                ensure!(
+                    self.initialized,
+                    "Collection arrived before startup boundary"
+                );
                 let started = Instant::now();
                 let index = u16::try_from(message["index"].as_u64().context("Missing index")?)?;
                 let raw =
                     STANDARD.decode(message["raw"].as_str().context("Missing raw collection")?)?;
                 let parts = self.recordings.add(index, &raw, output)?;
-                let mut detected = None;
-                if self.gestures_live && self.interaction.accepts_taps() {
-                    // Use explicit button metadata plus the existing short-audio
-                    // classification. Do not count cumulative sequence entries
-                    // again every time they appear in an audio collection.
-                    let records = crate::collection::records(&raw)?;
-                    let short = records.get(&83).is_some_and(|bytes| {
-                        if bytes.len() < 8 {
-                            return false;
-                        }
-                        let count = crate::collection::u32le(&bytes[4..]);
-                        count > 0
-                            && count <= 32
-                            && crate::collection::u32le(bytes) & (1 << (count - 1)) == 0
-                    });
-                    let press =
-                        if short && parts.iter().any(|p| p.final_part && p.samples.is_empty()) {
-                            Some(Press::Short)
-                        } else if parts.iter().any(|p| !p.samples.is_empty()) {
-                            Some(Press::Hold)
-                        } else {
-                            None
-                        };
-                    if let Some(press) = press {
-                        if let Some(event) = self.gestures.observe(index, press, Instant::now()) {
-                            self.gesture_hooks.dispatch(event, output);
-                            detected = Some(InputEvent::Gesture(event));
-                        }
-                    }
-                }
-                output.debug(format!(
-                    "decoder collection={index} decode={:.3}s",
-                    started.elapsed().as_secs_f64()
-                ));
-                Ok(parts
-                    .into_iter()
-                    .map(|part| {
-                        InputEvent::Audio(AudioChunk {
+                let mut updates = std::collections::BTreeMap::new();
+                for part in parts {
+                    if !self.save_cursor {
+                        events.push(InputEvent::Audio(AudioChunk {
                             key: part.key,
                             samples: part.samples,
                             rate: part.rate,
                             final_part: part.final_part,
                             checkpoint: Some(json!(part.next)),
-                        })
-                    })
-                    .chain(detected)
-                    .collect())
-            }
-            "boundary" => {
-                self.gestures.reset();
-                self.gestures_live = false;
-                self.recordings.reset(u16::try_from(
-                    message["index"].as_u64().context("Missing boundary")?,
-                )?);
-                Ok(vec![])
-            }
-            "range" => Ok(self
-                .recordings
-                .retain(
-                    u16::try_from(message["start"].as_u64().context("Missing start")?)?,
-                    u16::try_from(message["end"].as_u64().context("Missing end")?)?,
-                    output,
-                )
-                .into_iter()
-                .map(InputEvent::Discard)
-                .collect()),
-            _ => PcmInput.decode(message, output),
-        }
-    }
-}
-impl InputAdapter for IndexInput {
-    fn decode(&mut self, message: Value, output: &Output) -> Result<Vec<InputEvent>> {
-        match message["type"].as_str() {
-            Some("button_state") => {
-                let pressed = message["pressed"]
-                    .as_bool()
-                    .context("Missing button state")?;
-                if !self.gestures_live {
-                    return Ok(vec![]);
+                        }));
+                        continue;
+                    }
+                    let position = self.recordings.position(part.index);
+                    let buttons: Option<Vec<Press>> = part.buttons.as_ref().map(|b| {
+                        b.iter()
+                            .map(|b| {
+                                if b == "long" {
+                                    Press::Long
+                                } else {
+                                    Press::Short
+                                }
+                            })
+                            .collect()
+                    });
+                    let delta = self.history.observe(position, buttons.as_deref())?;
+                    let first = !self.classification.contains_key(&part.key);
+                    let classification = self
+                        .classification
+                        .entry(part.key.clone())
+                        .or_default()
+                        .observe(&delta, first, part.final_part);
+                    output.debug(format!("Button history source={} collection={} evidence={:?} added={:?} classification={classification:?} lifetime_count={:?}",part.key, part.index, delta.evidence, delta.added, part.lifetime_count));
+                    // Gap completion can release several C records at once. Normalize
+                    // all their histories before a completed short retires the source.
+                    updates.insert(part.key.clone(), (classification, part.samples));
+                    if position >= self.unread {
+                        self.parsed.insert(position);
+                    }
                 }
-                let now = Instant::now();
-                self.interaction.button(pressed, now);
-                let mut result = vec![];
-                if let Some(event) = self.gestures.state(pressed, now)
-                    && self.interaction.accepts_taps()
-                {
-                    self.gesture_hooks.dispatch(event, output);
-                    result.push(InputEvent::Gesture(event));
+                for (key, (classification, samples)) in updates {
+                    let observation = self.recordings.observation(&key, classification)?;
+                    events.extend(self.observe(Observation::Source(observation), output)?);
+                    if !samples.is_empty()
+                        && let Some(session) = self.interaction.source_session(&key)
+                    {
+                        events.push(InputEvent::Level {
+                            key: self.interaction.key(session),
+                            level: crate::audio_level::normalized_iter(samples.iter().copied()),
+                        });
+                    }
                 }
-                return Ok(result);
-            }
-            Some("connection_lost") => {
-                let mut result = self.interaction.disconnected();
-                self.gestures.reset();
-                self.gestures_live = false;
-                result.extend(
-                    self.interaction
-                        .apply(self.continuation.connection_lost(output)),
-                );
-                output.debug("Desktop interaction: connection_lost -> Error; wait 5s then cancel; no recognition from recovered audio");
-                return Ok(result);
-            }
-            Some("caught_up") => {
-                self.interaction.ready();
-                self.continuation.caught_up(output);
-                self.gestures_live = self.save_cursor;
-                return Ok(vec![]);
-            }
-            _ => {}
-        }
-        if !self.save_cursor {
-            return self.decode_raw(message, output);
-        }
-        let trigger = message["type"].as_str().unwrap_or("unknown").to_owned();
-        let before = self.interaction.state();
-        let mut result = vec![];
-        if message["type"] == "state" {
-            if let Some(pressed) = message["collecting"].as_bool() {
-                result.extend(self.interaction.observe_state(
-                    pressed,
-                    Instant::now(),
-                    self.resume_grace,
+                while self.parsed.remove(&self.unread) {
+                    self.unread += 1;
+                }
+                self.known_end = self.known_end.max(self.recordings.position(index) + 1);
+                if self.save_cursor {
+                    events.extend(self.observe(
+                        Observation::Watermark {
+                            known_end: self.known_end,
+                            processed_end: self.unread.min(self.known_end),
+                        },
+                        output,
+                    )?);
+                }
+                output.debug(format!(
+                    "decoder collection={index} decode={:.3}s",
+                    started.elapsed().as_secs_f64()
                 ));
             }
+            "caught_up" => {}
+            "flush" if self.save_cursor => {
+                self.interaction.ensure_flushed()?;
+                events.push(InputEvent::Flush);
+            }
+            _ => events.extend(PcmInput.decode(message, output)?),
         }
-        for event in self.decode_raw(message, output)? {
-            result.extend(self.continuation.apply(event, output)?);
-        }
-        let result = self.interaction.apply(result);
-        if !self.interaction.accepts_taps() {
-            self.gestures.hold_started();
-        }
-        if before != self.interaction.state() {
-            output.debug(format!(
-                "Desktop interaction: {:?} -> {:?}; trigger={trigger}",
-                before,
-                self.interaction.state()
-            ));
-        }
-        Ok(result)
+        Ok(events)
     }
     fn poll(&mut self, output: &Output) -> Result<Vec<InputEvent>> {
-        let mut result = self.continuation.poll(output);
-        let threshold_events = self.interaction.poll(Instant::now());
-        if !threshold_events.is_empty() {
-            output.debug(format!(
-                "Desktop interaction: timer fired; state={:?}",
-                self.interaction.state()
-            ));
-            self.gestures.hold_started();
-        }
-        if self.gestures_live && self.interaction.accepts_taps() {
-            if let Some(event) = self.gestures.poll(Instant::now()) {
-                self.gesture_hooks.dispatch(event, output);
-                result.push(InputEvent::Gesture(event));
-            }
-        }
-        let mut threshold_events = threshold_events;
-        threshold_events.extend(self.interaction.apply(result));
-        Ok(threshold_events)
+        // Reception deadlines only advance on producer clock messages. IPC or
+        // ASR delay cannot allow a consumer wall-clock timer to overtake input.
+        self.acknowledgements(output)
     }
     fn completed(&mut self, key: &str) {
-        self.interaction.complete(key);
+        self.completed.push(key.into());
     }
     fn commit(&mut self, checkpoint: &Value) -> Result<()> {
         if self.save_cursor {
-            config::save_cursor(
-                &self.address,
-                u16::try_from(checkpoint.as_u64().context("Invalid Index checkpoint")?)?,
-            )?;
+            let index = u16::try_from(checkpoint.as_u64().context("Invalid Index checkpoint")?)?;
+            let position = self.recordings.position(index);
+            if self.committed.is_none_or(|old| position > old) {
+                config::save_cursor(&self.address, index)?;
+                self.committed = Some(position);
+            }
         }
         Ok(())
-    }
-}
-
-#[cfg(test)]
-mod gesture_tests {
-    use super::*;
-    fn short_collection(index: u16) -> Value {
-        let mut records = vec![80];
-        records.extend(8u32.to_le_bytes());
-        records.extend(16000u32.to_le_bytes());
-        records.extend([0, 0, 0, 0]);
-        records.push(83);
-        records.extend(8u16.to_le_bytes());
-        records.extend(0u32.to_le_bytes());
-        records.extend(1u32.to_le_bytes());
-        let mut raw = ((records.len() + 4) as u32).to_le_bytes().to_vec();
-        raw.extend(records);
-        json!({"type":"collection", "index":index, "raw":STANDARD.encode(raw)})
-    }
-    #[test]
-    fn only_live_taps_reach_the_ui_contract() {
-        let output = Output::new(false, None).unwrap();
-        let mut input = IndexInput::new("test", true).unwrap();
-        input.gestures = Detector::new(Duration::ZERO);
-        input.decode(short_collection(1), &output).unwrap();
-        assert!(
-            !input
-                .poll(&output)
-                .unwrap()
-                .iter()
-                .any(|e| matches!(e, InputEvent::Gesture(_)))
-        );
-        input.decode(json!({"type":"caught_up"}), &output).unwrap();
-        input.decode(short_collection(2), &output).unwrap();
-        let events = input.poll(&output).unwrap();
-        assert!(events.iter().any(|e| matches!(e, InputEvent::Gesture(g) if g.gesture == super::super::gestures::Gesture::SingleTap)));
-        assert!(
-            !input
-                .poll(&output)
-                .unwrap()
-                .iter()
-                .any(|e| matches!(e, InputEvent::Gesture(_)))
-        );
-        input
-            .decode(json!({"type":"connection_lost"}), &output)
-            .unwrap();
-        input.decode(short_collection(3), &output).unwrap();
-        assert!(
-            !input
-                .poll(&output)
-                .unwrap()
-                .iter()
-                .any(|e| matches!(e, InputEvent::Gesture(_)))
-        );
     }
 }

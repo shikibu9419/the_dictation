@@ -13,6 +13,7 @@ mod helper;
 mod model_download;
 mod output;
 mod pairing;
+use pebble_index::pcm;
 mod qwen_runtime;
 mod qwen_setup;
 mod recognition;
@@ -123,8 +124,11 @@ pub struct Listen {
     address: Option<String>,
     #[arg(long, default_value_t = 30.0)]
     timeout: f64,
-    #[arg(long, default_value_t = 0.25)]
-    interval: f64,
+    #[arg(
+        long,
+        help = "Override the configured state polling interval, in seconds"
+    )]
+    interval: Option<f64>,
     #[arg(long)]
     pair: bool,
     #[arg(long, conflicts_with = "no_transcribe")]
@@ -220,8 +224,7 @@ async fn run(action: Action, output: Output) -> Result<()> {
         Action::Listen(args) | Action::Fetch(args)
             if !args.timeout.is_finite()
                 || args.timeout <= 0.0
-                || !args.interval.is_finite()
-                || args.interval <= 0.0 =>
+                || args.interval.is_some_and(|n| !n.is_finite() || n <= 0.0) =>
         {
             anyhow::bail!("--timeout and --interval must be positive")
         }

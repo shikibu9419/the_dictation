@@ -62,7 +62,7 @@ pub fn rice_decode(data: &[u8], bit_count: usize, parameters: u8) -> Result<Vec<
     }
     Ok(output)
 }
-pub fn records(raw: &[u8]) -> Result<BTreeMap<u8, Vec<u8>>> {
+pub fn records(raw: &[u8]) -> Result<BTreeMap<u8, &[u8]>> {
     ensure!(raw.len() >= 3, "Truncated collection header");
     let (declared, mut offset, expected) = if raw.len() > 3 && raw[3] == 0 {
         (
@@ -100,7 +100,10 @@ pub fn records(raw: &[u8]) -> Result<BTreeMap<u8, Vec<u8>>> {
             .checked_add(length)
             .context("Record length overflow")?;
         ensure!(end <= raw.len(), "Record extends beyond collection");
-        result.insert(id, raw[start..end].to_vec());
+        ensure!(
+            result.insert(id, &raw[start..end]).is_none(),
+            "Duplicate collection record {id}"
+        );
         offset = end;
     }
     Ok(result)
@@ -108,7 +111,7 @@ pub fn records(raw: &[u8]) -> Result<BTreeMap<u8, Vec<u8>>> {
 pub fn metadata(raw: &[u8]) -> Result<(Option<u32>, bool, bool)> {
     metadata_records(&records(raw)?)
 }
-fn metadata_records(records: &BTreeMap<u8, Vec<u8>>) -> Result<(Option<u32>, bool, bool)> {
+fn metadata_records(records: &BTreeMap<u8, &[u8]>) -> Result<(Option<u32>, bool, bool)> {
     if let Some(p) = records.get(&82) {
         ensure!(p.len() >= 6, "Truncated audio metadata");
         Ok((Some(u32le(p)), p[4] != 0, p[5] != 0))
@@ -124,6 +127,9 @@ pub struct Collection {
     pub multipart: bool,
     pub final_part: bool,
     pub buttons: Option<Vec<String>>,
+    pub lifetime_count: Option<u32>,
+    /// Diagnostic headers from the same validated TLV pass as the PCM.
+    pub headers: BTreeMap<u8, Vec<u8>>,
 }
 pub fn decode(raw: &[u8]) -> Result<Collection> {
     let records = records(raw)?;
@@ -173,6 +179,18 @@ pub fn decode(raw: &[u8]) -> Result<Collection> {
     } else {
         None
     };
+    let lifetime_count = records
+        .get(&84)
+        .map(|p| -> Result<u32> {
+            ensure!(p.len() >= 4, "Truncated lifetime count");
+            Ok(u32le(p))
+        })
+        .transpose()?;
+    let headers = records
+        .iter()
+        .filter(|(id, _)| **id != 80 && **id != 81)
+        .map(|(id, bytes)| (*id, bytes.to_vec()))
+        .collect();
     Ok(Collection {
         samples,
         rate,
@@ -180,5 +198,7 @@ pub fn decode(raw: &[u8]) -> Result<Collection> {
         multipart,
         final_part,
         buttons,
+        lifetime_count,
+        headers,
     })
 }

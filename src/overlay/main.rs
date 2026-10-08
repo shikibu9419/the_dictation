@@ -68,7 +68,7 @@ fn load_model() -> Model {
             Ok(texts) => model.restore_history(texts),
             Err(error) => eprintln!("[GUI] Read history: {error}"),
         },
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {},
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
         Err(error) => eprintln!("[GUI] Read history: {error}"),
     }
     model
@@ -103,7 +103,7 @@ impl Backend {
         } else if settings::Settings::load()?.input == settings::InputSource::Microphone {
             command.args(["microphone", "--gui-events"]);
         } else {
-            command.args(["listen", "--gui-events", "--interval", "0.1"]);
+            command.args(["listen", "--gui-events"]);
         }
         if verbose {
             command.arg("-v");
@@ -154,7 +154,14 @@ fn read_events(reader: impl BufRead, generation: Option<u64>) {
                 if let Ok(value) = serde_json::from_str::<serde_json::Value>(&line)
                     && matches!(
                         value["type"].as_str(),
-                        Some("paste_result" | "copy_result" | "paste_permission" | "audio_level" | "gesture" | "gesture_paste_result")
+                        Some(
+                            "paste_result"
+                                | "copy_result"
+                                | "paste_permission"
+                                | "audio_level"
+                                | "gesture"
+                                | "gesture_paste_result"
+                        )
                     )
                 {
                     if tx
@@ -215,13 +222,20 @@ impl Overlay {
             file.persist(path)?;
             Ok(())
         })();
-        if let Err(error) = result { eprintln!("[GUI] Save history: {error:#}"); }
+        if let Err(error) = result {
+            eprintln!("[GUI] Save history: {error:#}");
+        }
     }
     fn history_move(&mut self, older: bool, window: &mut Window, cx: &mut Context<Self>) {
-        if self.pasting || self.editing.is_none() { return; }
+        if self.pasting || self.editing.is_none() {
+            return;
+        }
         let before = self.input.update(cx, |input, cx| {
             if input.marked_text_range(window, cx).is_some()
-                || input.selected_text_range(false, window, cx).is_some_and(|s| !s.range.is_empty()) {
+                || input
+                    .selected_text_range(false, window, cx)
+                    .is_some_and(|s| !s.range.is_empty())
+            {
                 return None;
             }
             Some(input.cursor())
@@ -231,9 +245,11 @@ impl Overlay {
         // Let the editor perform its normal visual-line movement, then browse
         // only if the caret could not move. This also handles wrapped lines.
         cx.defer_in(window, move |this, window, cx| {
-            if !this.pasting && this.editing == editing
+            if !this.pasting
+                && this.editing == editing
                 && this.input.read(cx).cursor() == before
-                && this.model.browse(older, unsafe { index_frontmost_pid() }) {
+                && this.model.browse(older, unsafe { index_frontmost_pid() })
+            {
                 this.update_panel(window, cx);
             }
         });
@@ -242,7 +258,12 @@ impl Overlay {
     fn panel_layout(&self, window: &mut Window) -> (bool, String, f32, f32) {
         let item = self.model.visible();
         let phase = item.map(|i| i.phase);
-        let circular = presentation::surface(self.presentation, phase, self.model.error.is_some(), self.model.history_view) != presentation::Surface::Transcript;
+        let circular = presentation::surface(
+            self.presentation,
+            phase,
+            self.model.error.is_some(),
+            self.model.history_view,
+        ) != presentation::Surface::Transcript;
         let text = self
             .model
             .error
@@ -292,17 +313,28 @@ impl Overlay {
         if self.panel_height != height || self.panel_circular != circular {
             self.panel_height = height;
             self.panel_circular = circular;
-            unsafe { index_panel_resize(if circular { 96. } else { 580. }, height as f64, circular); }
+            unsafe {
+                index_panel_resize(if circular { 96. } else { 580. }, height as f64, circular);
+            }
         }
 
-        if self.presentation.live_mode || !self.model.visible().is_some_and(|item| item.phase == Phase::Recording) {
-            unsafe { index_panel_audio(0., false); }
+        if self.presentation.live_mode
+            || !self
+                .model
+                .visible()
+                .is_some_and(|item| item.phase == Phase::Recording)
+        {
+            unsafe {
+                index_panel_audio(0., false);
+            }
         }
         let was_editing = self.editing;
         let editable = self
             .model
             .visible()
-            .filter(|i| i.phase == Phase::Ready && (self.presentation.live_mode || self.model.history_view))
+            .filter(|i| {
+                i.phase == Phase::Ready && (self.presentation.live_mode || self.model.history_view)
+            })
             .map(|i| (i.id, i.text.clone()));
         if let Some((id, text)) = editable {
             if self.editing != Some(id) {
@@ -322,10 +354,17 @@ impl Overlay {
             self.editing = None;
         }
         if self.editing != was_editing {
-            unsafe { index_panel_editing(self.editing.is_some()); }
+            unsafe {
+                index_panel_editing(self.editing.is_some());
+            }
         }
-        let visible =
-            !self.pasting && presentation::surface(self.presentation, self.model.visible().map(|i| i.phase), self.model.error.is_some(), self.model.history_view) != presentation::Surface::Hidden;
+        let visible = !self.pasting
+            && presentation::surface(
+                self.presentation,
+                self.model.visible().map(|i| i.phase),
+                self.model.error.is_some(),
+                self.model.history_view,
+            ) != presentation::Surface::Hidden;
         let item_id = self.model.visible().map(|item| item.id);
         unsafe {
             let title = if self.model.error.is_some() {
@@ -383,11 +422,19 @@ impl Overlay {
         cx.notify();
     }
     fn event(&mut self, event: Event, window: &mut Window, cx: &mut Context<Self>) {
-        let before = self.model.visible().map(|i| (i.id, i.recording.clone(), i.phase));
-        let cause = format!("type={} recording={:?} collecting={:?} mode={:?} final={:?} empty={}", event.r#type, event.recording, event.collecting, event.mode, event.r#final, event.empty);
+        let before = self
+            .model
+            .visible()
+            .map(|i| (i.id, i.recording.clone(), i.phase));
+        let cause = format!(
+            "type={} recording={:?} collecting={:?} mode={:?} final={:?} empty={}",
+            event.r#type, event.recording, event.collecting, event.mode, event.r#final, event.empty
+        );
         let completion_key = event.recording.clone();
         let completion_text = event.text.clone();
-        let completed = event.r#type == "text" && event.mode.as_deref() == Some("batch") && event.r#final == Some(true);
+        let completed = event.r#type == "text"
+            && event.mode.as_deref() == Some("batch")
+            && event.r#final == Some(true);
         if event.r#type == "error" {
             self.pasting = false;
         }
@@ -404,38 +451,75 @@ impl Overlay {
             );
         }
         self.model.accept(event, target);
-        let after = self.model.visible().map(|i| (i.id, i.recording.clone(), i.phase));
+        let after = self
+            .model
+            .visible()
+            .map(|i| (i.id, i.recording.clone(), i.phase));
         if before != after || cause.ends_with("empty=true") {
-            let line = format!("[{}] GUI transition: {before:?} -> {after:?}; {cause}\n", chrono::Local::now().format("%Y-%m-%dT%H:%M:%S%.3f"));
-            if self.verbose { eprint!("{line}"); }
-            if let Some(path) = &self.log {
-                if let Err(error) = std::fs::OpenOptions::new().create(true).append(true).open(path).and_then(|mut file| file.write_all(line.as_bytes())) {
-                    eprintln!("[GUI] Write transition log: {error}");
-                }
+            let line = format!(
+                "[{}] GUI transition: {before:?} -> {after:?}; {cause}\n",
+                chrono::Local::now().format("%Y-%m-%dT%H:%M:%S%.3f")
+            );
+            if self.verbose {
+                eprint!("{line}");
+            }
+            if let Some(path) = &self.log
+                && let Err(error) = std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(path)
+                    .and_then(|mut file| file.write_all(line.as_bytes()))
+            {
+                eprintln!("[GUI] Write transition log: {error}");
             }
         }
         if completed {
             self.save_history();
-            self.copied.retain(|key| self.model.items.iter().any(|item| item.recording.as_ref() == Some(key)));
+            self.copied.retain(|key| {
+                self.model
+                    .items
+                    .iter()
+                    .any(|item| item.recording.as_ref() == Some(key))
+            });
             if let Some(key) = completion_key {
-                let id = self.model.items.iter().find(|i| i.recording.as_ref() == Some(&key)).map(|i| i.id);
+                let id = self
+                    .model
+                    .items
+                    .iter()
+                    .find(|i| i.recording.as_ref() == Some(&key))
+                    .map(|i| i.id);
                 if let Some(id) = id {
                     if self.copied.insert(key) {
                         let request = serde_json::json!({"type":"copy", "request":id, "text":completion_text.unwrap_or_default()});
-                        if let Some(backend) = &mut self.backend {
-                            if let Err(error) = backend.send(request) {
-                                self.model.error = Some(format!("コピー要求を送信できませんでした: {error}"));
-                            }
+                        if let Some(backend) = &mut self.backend
+                            && let Err(error) = backend.send(request)
+                        {
+                            self.model.error =
+                                Some(format!("コピー要求を送信できませんでした: {error}"));
                         }
                     }
-                    if !self.presentation.live_mode || !self.presentation.final_text || self.model.items.iter().any(|i| i.id == id && i.text.trim().is_empty()) { self.model.dismiss_id(id); }
+                    if !self.presentation.live_mode
+                        || !self.presentation.final_text
+                        || self
+                            .model
+                            .items
+                            .iter()
+                            .any(|i| i.id == id && i.text.trim().is_empty())
+                    {
+                        self.model.dismiss_id(id);
+                    }
                 }
             }
         }
         self.update_panel(window, cx);
     }
     fn gesture(&mut self, event: &serde_json::Value, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(action) = event["gesture"].as_str().and_then(|name| self.gestures.action(name)) else { return; };
+        let Some(action) = event["gesture"]
+            .as_str()
+            .and_then(|name| self.gestures.action(name))
+        else {
+            return;
+        };
         let target = unsafe { index_frontmost_pid() };
         match action {
             settings::GestureAction::History => {
@@ -444,19 +528,29 @@ impl Overlay {
             }
             settings::GestureAction::Paste => {
                 self.gesture_request += 1;
-                if let Some(backend) = &mut self.backend {
-                    if let Err(error) = backend.send(serde_json::json!({"type":"paste_current",
-                        "request":self.gesture_request, "target":target})) {
-                        eprintln!("[GUI] Gesture paste failed: {error}");
-                    }
+                if let Some(backend) = &mut self.backend
+                    && let Err(error) = backend.send(serde_json::json!({"type":"paste_current",
+                        "request":self.gesture_request, "target":target}))
+                {
+                    eprintln!("[GUI] Gesture paste failed: {error}");
                 }
             }
         }
     }
     fn start(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         match settings::Settings::load() {
-            Ok(settings) => { self.presentation = settings.presentation; self.gestures = settings.gestures; },
-            Err(error) => { self.event(Event::error(format!("設定を読み込めませんでした: {error}")), window, cx); return; }
+            Ok(settings) => {
+                self.presentation = settings.presentation;
+                self.gestures = settings.gestures;
+            }
+            Err(error) => {
+                self.event(
+                    Event::error(format!("設定を読み込めませんでした: {error}")),
+                    window,
+                    cx,
+                );
+                return;
+            }
         }
         self.copied.clear();
         match Backend::start(&self.backend_path, self.verbose, self.log.as_deref()) {
@@ -472,12 +566,18 @@ impl Overlay {
         if self.pasting {
             return;
         }
-        if self.editing.is_some() && self.input.update(cx, |input, cx| {
-            if input.marked_text_range(window, cx).is_some() {
-                input.unmark_text(window, cx);
-                true
-            } else { false }
-        }) { return; }
+        if self.editing.is_some()
+            && self.input.update(cx, |input, cx| {
+                if input.marked_text_range(window, cx).is_some() {
+                    input.unmark_text(window, cx);
+                    true
+                } else {
+                    false
+                }
+            })
+        {
+            return;
+        }
         if let (Some(backend), Some(item)) = (&mut self.backend, self.model.visible()) {
             let _ = backend.send(serde_json::json!({"type":"forget_target","request":item.id}));
         }
@@ -520,30 +620,47 @@ impl Overlay {
 }
 fn microphone() -> impl IntoElement {
     div().size(px(24.)).rounded_full().with_animation(
-        "microphone-glow", Animation::new(Duration::from_millis(1067)).repeat(),
+        "microphone-glow",
+        Animation::new(Duration::from_millis(1067)).repeat(),
         |d, delta| {
-            let alpha = if unsafe { index_reduce_motion() } { 0.35 } else {
+            let alpha = if unsafe { index_reduce_motion() } {
+                0.35
+            } else {
                 0.12 + 0.28 * (1. - (delta * std::f32::consts::TAU).cos()) / 2.
             };
-            d.shadow(vec![BoxShadow { color: rgba(0xff334b00 | (alpha * 255.) as u32).into(),
-                offset: point(px(0.), px(0.)), blur_radius: px(7.), spread_radius: px(0.) }])
-             .child(canvas(|_, _, _| (), |bounds, _, window, _| {
-                let center = bounds.center();
-                let mut path = PathBuilder::stroke(px(2.2));
-                let p = |x: f32, y: f32| center + point(px(x), px(y));
-                path.move_to(p(-4., -7.));
-                path.cubic_bezier_to(p(4., -7.), p(-4., -12.), p(4., -12.));
-                path.line_to(p(4., 1.));
-                path.cubic_bezier_to(p(-4., 1.), p(4., 6.), p(-4., 6.));
-                path.close();
-                path.move_to(p(-7., -1.));
-                path.line_to(p(-7., 1.));
-                path.cubic_bezier_to(p(7., 1.), p(-7., 10.), p(7., 10.));
-                path.line_to(p(7., -1.));
-                path.move_to(p(0., 7.)); path.line_to(p(0., 11.));
-                path.move_to(p(-4., 11.)); path.line_to(p(4., 11.));
-                if let Ok(path) = path.build() { window.paint_path(path, rgb(0xff334b)); }
-             }).size_full())
+            d.shadow(vec![BoxShadow {
+                color: rgba(0xff334b00 | (alpha * 255.) as u32).into(),
+                offset: point(px(0.), px(0.)),
+                blur_radius: px(7.),
+                spread_radius: px(0.),
+            }])
+            .child(
+                canvas(
+                    |_, _, _| (),
+                    |bounds, _, window, _| {
+                        let center = bounds.center();
+                        let mut path = PathBuilder::stroke(px(2.2));
+                        let p = |x: f32, y: f32| center + point(px(x), px(y));
+                        path.move_to(p(-4., -7.));
+                        path.cubic_bezier_to(p(4., -7.), p(-4., -12.), p(4., -12.));
+                        path.line_to(p(4., 1.));
+                        path.cubic_bezier_to(p(-4., 1.), p(4., 6.), p(-4., 6.));
+                        path.close();
+                        path.move_to(p(-7., -1.));
+                        path.line_to(p(-7., 1.));
+                        path.cubic_bezier_to(p(7., 1.), p(-7., 10.), p(7., 10.));
+                        path.line_to(p(7., -1.));
+                        path.move_to(p(0., 7.));
+                        path.line_to(p(0., 11.));
+                        path.move_to(p(-4., 11.));
+                        path.line_to(p(4., 11.));
+                        if let Ok(path) = path.build() {
+                            window.paint_path(path, rgb(0xff334b));
+                        }
+                    },
+                )
+                .size_full(),
+            )
         },
     )
 }
@@ -552,17 +669,33 @@ impl Render for Overlay {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let item = self.model.visible();
         let phase = item.map(|i| i.phase);
-        let circular = presentation::surface(self.presentation, phase, self.model.error.is_some(), self.model.history_view) != presentation::Surface::Transcript;
+        let circular = presentation::surface(
+            self.presentation,
+            phase,
+            self.model.error.is_some(),
+            self.model.history_view,
+        ) != presentation::Surface::Transcript;
         let recording = phase == Some(Phase::Recording);
-        let busy = matches!(phase, Some(Phase::Receiving | Phase::Reconnecting | Phase::Finalizing));
+        let busy = matches!(
+            phase,
+            Some(Phase::Receiving | Phase::Reconnecting | Phase::Finalizing)
+        );
         let editable = phase == Some(Phase::Ready) && self.model.error.is_none();
         let (_, text, body_height, _) = self.panel_layout(window);
         div()
             .id("dictation")
             .track_focus(&self.focus)
             .key_context("Dictation")
-            .capture_action(cx.listener(|this, _: &gpui_component::input::MoveUp, window, cx| this.history_move(true, window, cx)))
-            .capture_action(cx.listener(|this, _: &gpui_component::input::MoveDown, window, cx| this.history_move(false, window, cx)))
+            .capture_action(
+                cx.listener(|this, _: &gpui_component::input::MoveUp, window, cx| {
+                    this.history_move(true, window, cx)
+                }),
+            )
+            .capture_action(
+                cx.listener(|this, _: &gpui_component::input::MoveDown, window, cx| {
+                    this.history_move(false, window, cx)
+                }),
+            )
             .on_action(cx.listener(Self::paste))
             .on_action(cx.listener(Self::dismiss))
             .size_full()
@@ -664,37 +797,39 @@ impl Render for Overlay {
                                 ))
                             }),
                     )
-                    .when(!circular, |d| d.child(
-                        div()
-                            .w(px(497.))
-                            .flex_none()
-                            .flex()
-                            .flex_col()
-                            .when(editable, |d| {
-                                d.child(
-                                    Input::new(&self.input)
-                                        .appearance(false)
-                                        .bordered(false)
-                                        .focus_bordered(false)
-                                        .h(px(body_height))
-                                        .p_0()
-                                        .text_size(px(22.5))
-                                        .line_height(px(30.)),
-                                )
-                            })
-                            .when(!editable, |d| {
-                                d.child(
-                                    div()
-                                        .id("transcript")
-                                        .w(px(487.))
-                                        .h(px(body_height))
-                                        .overflow_y_scroll()
-                                        .track_scroll(&self.scroll)
-                                        .line_height(px(30.))
-                                        .child(text),
-                                )
-                            }),
-                    )),
+                    .when(!circular, |d| {
+                        d.child(
+                            div()
+                                .w(px(497.))
+                                .flex_none()
+                                .flex()
+                                .flex_col()
+                                .when(editable, |d| {
+                                    d.child(
+                                        Input::new(&self.input)
+                                            .appearance(false)
+                                            .bordered(false)
+                                            .focus_bordered(false)
+                                            .h(px(body_height))
+                                            .p_0()
+                                            .text_size(px(22.5))
+                                            .line_height(px(30.)),
+                                    )
+                                })
+                                .when(!editable, |d| {
+                                    d.child(
+                                        div()
+                                            .id("transcript")
+                                            .w(px(487.))
+                                            .h(px(body_height))
+                                            .overflow_y_scroll()
+                                            .track_scroll(&self.scroll)
+                                            .line_height(px(30.))
+                                            .child(text),
+                                    )
+                                }),
+                        )
+                    }),
             )
     }
 }

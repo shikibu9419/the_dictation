@@ -52,7 +52,10 @@ mod tests {
             panic!("audio")
         };
         assert_eq!(chunk.key, "mic-one");
-        assert_eq!(chunk.samples, [-32768, 32767]);
+        assert_eq!(
+            chunk.samples.iter().copied().collect::<Vec<_>>(),
+            [-32768, 32767]
+        );
         assert!(!chunk.final_part);
         assert!(chunk.checkpoint.is_none());
     }

@@ -38,26 +38,53 @@ pub fn emit(event: Value) {
     let _ = out.flush();
 }
 #[derive(Default)]
+struct ReceptionControl {
+    generation: u64,
+    live: bool,
+    visible: bool,
+}
+#[derive(Default)]
 struct Lifecycle {
     collecting: Option<bool>,
     released: HashSet<String>,
     finished: HashSet<String>,
     closed: HashSet<String>,
+    reception: HashMap<String, ReceptionControl>,
 }
 impl Lifecycle {
     fn suppressed(&self, key: &str) -> bool {
-        self.collecting == Some(false) || self.released.contains(key)
+        self.reception.get(key).map_or(
+            self.collecting == Some(false) || self.released.contains(key),
+            |s| !s.live,
+        )
+    }
+    fn permits(&self, key: &str, generation: Option<u64>) -> bool {
+        generation.map_or_else(
+            || !self.suppressed(key),
+            |generation| {
+                self.reception
+                    .get(key)
+                    .is_some_and(|s| s.live && s.generation == generation)
+            },
+        )
+    }
+    fn visible(&self, key: &str, generation: Option<u64>) -> bool {
+        self.permits(key, generation)
+            && generation.is_none_or(|_| self.reception.get(key).is_some_and(|s| s.visible))
     }
     fn retire(&mut self, key: &str) {
         if self.finished.contains(key) && self.closed.contains(key) {
             self.released.remove(key);
             self.finished.remove(key);
             self.closed.remove(key);
+            self.reception.remove(key);
         }
     }
 }
 enum Job {
     Audio(Part, Instant),
+    ReceptionAudio(Part, Instant, u64),
+    Reset(String, u64),
     Release(String),
     Flush(oneshot::Sender<()>),
     Checkpoint(Value),
@@ -66,6 +93,7 @@ struct Speech {
     engine: Box<dyn SpeechEngine>,
     mode: &'static str,
     key: Option<String>,
+    generation: Option<u64>,
     rate: Option<u32>,
     segments: Vec<(f64, f64)>,
     samples: usize,
@@ -88,6 +116,7 @@ impl Speech {
             engine,
             mode,
             key: None,
+            generation: None,
             rate: None,
             segments: vec![],
             samples: 0,
@@ -149,11 +178,11 @@ impl Speech {
                 self.first_result = true;
             }
             let suppressed = self.mode == "live"
-                && self
+                && !self
                     .lifecycle
                     .lock()
                     .unwrap()
-                    .suppressed(self.key.as_deref().unwrap_or(""));
+                    .visible(self.key.as_deref().unwrap_or(""), self.generation);
             let label = if suppressed && kind == "partial" {
                 "suppressed partial"
             } else {
@@ -163,7 +192,7 @@ impl Speech {
                 "[{}] {label} recording={:?}: {text}",
                 self.mode, self.key
             ));
-            if !suppressed || kind == "final" {
+            if !suppressed {
                 let mut result = json!({"type":"text","text":text,"final":kind=="final","recording":self.key,"mode":self.mode});
                 if kind == "final" {
                     result["segments"] = json!(self.segments);
@@ -222,8 +251,12 @@ impl Speech {
         ));
         Ok(())
     }
-    async fn feed(&mut self, part: Part, queued: Instant) -> Result<()> {
-        if self.key.as_ref().is_some_and(|key| *key != part.key) {
+    async fn feed(&mut self, part: Part, queued: Instant, generation: Option<u64>) -> Result<()> {
+        if self
+            .key
+            .as_ref()
+            .is_some_and(|key| *key != part.key || self.generation != generation)
+        {
             self.cancel().await?;
         }
         if self.key.is_none()
@@ -232,6 +265,7 @@ impl Speech {
             priority.acquire().await?;
         }
         self.key = Some(part.key.clone());
+        self.generation = generation;
         if self.rate.is_none() {
             self.rate = Some(part.rate);
             self.samples = 0;
@@ -246,6 +280,16 @@ impl Speech {
         let pcm = part.samples;
         self.samples += pcm.len();
         for block in pcm.chunks((part.rate / 2).max(1) as usize) {
+            if self.mode == "live"
+                && !self
+                    .lifecycle
+                    .lock()
+                    .unwrap()
+                    .permits(&part.key, generation)
+            {
+                self.cancel().await?;
+                return Ok(());
+            }
             while self.engine.input_backlogged() {
                 let activity = self.engine.control().map(|c| c.activity());
                 let event =
@@ -279,6 +323,7 @@ impl Speech {
             self.command(EngineCommand::Cancel, "cancelled").await?;
         }
         self.key = None;
+        self.generation = None;
         self.rate = None;
         if let Some(priority) = &mut self.priority {
             priority.release().await?;
@@ -295,16 +340,16 @@ impl Speech {
                 event=self.engine.event()=>{self.event(event?)?;}
                 job=jobs.recv()=>{
                     match job {
-                        Some(Job::Audio(part,queued))=>{
+                        Some(job @ (Job::Audio(..) | Job::ReceptionAudio(..)))=>{
+                            let (part, queued, generation) = match job {
+                                Job::Audio(part, queued) => (part, queued, None),
+                                Job::ReceptionAudio(part, queued, generation) => (part, queued, Some(generation)),
+                                _ => unreachable!(),
+                            };
                             let key=part.key.clone();let checkpoint=part.checkpoint.clone();
-                            if self.mode=="live" && self.lifecycle.lock().unwrap().suppressed(&key) {continue;}
+                            if self.mode=="live" && !self.lifecycle.lock().unwrap().permits(&key, generation) {continue;}
                             self.output.debug(format!("latency {} input wait recording={key}: {:.3}s",self.mode,queued.elapsed().as_secs_f64()));
-                            if self.mode=="batch" && part.final_part && part.samples.len() * 1000 < part.rate as usize * 150 {
-                                self.output.debug(format!("recording={key}: below 150ms; returning empty text without speech inference"));
-                                emit(json!({"type":"text","recording":key,"mode":"batch","final":true,"text":""}));
-                            } else {
-                                self.feed(part,queued).await?;
-                            }
+                            self.feed(part,queued,generation).await?;
                             if self.mode=="batch" {
                                 if let Some(checkpoint) = checkpoint {input.lock().unwrap().commit(&checkpoint)?;}
                                 input.lock().unwrap().completed(&key);
@@ -312,8 +357,14 @@ impl Speech {
                             }
                         }
                         Some(Job::Release(key))=>{
-                            if self.key.as_ref()==Some(&key) {self.cancel().await?;}
-                            let mut life=self.lifecycle.lock().unwrap();life.closed.insert(key.clone());life.retire(&key);
+                            if self.key.as_ref()==Some(&key) && (self.generation.is_none() || !self.lifecycle.lock().unwrap().permits(&key, self.generation)) {self.cancel().await?;}
+                            let mut life=self.lifecycle.lock().unwrap();
+                            if life.reception.contains_key(&key) || life.released.contains(&key) || life.finished.contains(&key) {
+                                life.closed.insert(key.clone());life.retire(&key);
+                            }
+                        }
+                        Some(Job::Reset(key,generation))=>{
+                            if self.key.as_ref()==Some(&key) && self.generation != Some(generation) {self.cancel().await?;}
                         }
                         Some(Job::Checkpoint(value))=>{input.lock().unwrap().commit(&value)?;}
                         Some(Job::Flush(done))=>{let _=done.send(());}
@@ -329,10 +380,147 @@ struct Recognition {
     live: Option<mpsc::UnboundedSender<Job>>,
     batch: mpsc::UnboundedSender<Job>,
     lifecycle: Arc<Mutex<Lifecycle>>,
-    audio: HashMap<String, (Vec<i16>, u32)>,
+    audio: HashMap<String, (crate::pcm::Pcm, u32)>,
     output: Output,
 }
 impl Recognition {
+    fn reception(
+        &mut self,
+        namespace: &str,
+        effect: pebble_index::reception::input_effects::Effect,
+    ) -> Result<()> {
+        use pebble_index::reception::{input_effects::Effect, session_state::Action};
+        let key = |id| format!("{namespace}-{id}");
+        match effect {
+            Effect::Snapshot(snapshot) => {
+                emit(json!({"type":"reception_state", "namespace":namespace, "state":snapshot}))
+            }
+            Effect::View(view) => {
+                let key = key(view.id);
+                let was_visible = {
+                    let mut life = self.lifecycle.lock().unwrap();
+                    let control = life.reception.entry(key.clone()).or_default();
+                    let previous = control.visible;
+                    control.visible = view.visible;
+                    control.live = view.live && !view.failed;
+                    previous
+                };
+                if view.failed {
+                    emit(
+                        json!({"type":"discarded", "recording":key,"text":"録音データの一部が失われました。受信済み音声は保持しています。"}),
+                    );
+                } else if view.visible {
+                    emit(
+                        json!({"type":"reception_activity", "recording":key,"collecting":view.live}),
+                    );
+                } else if was_visible {
+                    emit(json!({"type":"cancelled", "recording":key}));
+                }
+            }
+            Effect::ResetLive {
+                session,
+                generation,
+            } => {
+                let key = key(session);
+                self.lifecycle
+                    .lock()
+                    .unwrap()
+                    .reception
+                    .entry(key.clone())
+                    .or_default()
+                    .generation = generation;
+                if let Some(live) = &self.live {
+                    live.send(Job::Reset(key, generation))?;
+                }
+            }
+            Effect::StopLive(session) => {
+                let key = key(session);
+                if let Some(control) = self.lifecycle.lock().unwrap().reception.get_mut(&key) {
+                    control.live = false;
+                }
+                if let Some(live) = &self.live {
+                    live.send(Job::Release(key))?;
+                } else {
+                    self.lifecycle.lock().unwrap().closed.insert(key);
+                }
+            }
+            Effect::Live(plan) => {
+                let key = key(plan.session);
+                self.lifecycle
+                    .lock()
+                    .unwrap()
+                    .reception
+                    .entry(key.clone())
+                    .or_default()
+                    .generation = plan.generation;
+                self.output.debug(format!(
+                    "live PCM recording={key} generation={} samples={}..{}",
+                    plan.generation,
+                    plan.start_sample,
+                    plan.start_sample + plan.pcm.len()
+                ));
+                if let Some(live) = &self.live {
+                    live.send(Job::ReceptionAudio(
+                        Part {
+                            key,
+                            samples: plan.pcm,
+                            rate: plan.rate,
+                            final_part: false,
+                            checkpoint: None,
+                        },
+                        Instant::now(),
+                        plan.generation,
+                    ))?;
+                }
+            }
+            Effect::Batch(plan) => {
+                let key = key(plan.session);
+                // A complete recording can arrive without a preceding S=true.
+                // Create its result item directly in dictating, never recording.
+                emit(json!({"type":"reception_activity", "recording":key,"collecting":false}));
+                self.output.debug(format!(
+                    "whole PCM recording={key} samples={} duration={:.3}s",
+                    plan.pcm.len(),
+                    plan.pcm.len() as f64 / plan.rate as f64
+                ));
+                self.batch.send(Job::Audio(
+                    Part {
+                        key,
+                        samples: plan.pcm,
+                        rate: plan.rate,
+                        final_part: true,
+                        checkpoint: None,
+                    },
+                    Instant::now(),
+                ))?;
+            }
+            Effect::Action(Action::MergeSession { from, into }) => {
+                let from = key(from);
+                self.lifecycle.lock().unwrap().reception.remove(&from);
+                emit(
+                    json!({"type":"reception_merge","recording":from,"target_recording":key(into)}),
+                );
+            }
+            Effect::Action(Action::Retire { session, .. }) => {
+                let key = key(session);
+                let mut life = self.lifecycle.lock().unwrap();
+                let visible = life.reception.get(&key).is_some_and(|s| s.visible);
+                if let Some(control) = life.reception.get_mut(&key) {
+                    control.live = false;
+                }
+                // Batch completion sets finished before the input acknowledges it.
+                if !life.finished.contains(&key) && visible {
+                    emit(json!({"type":"cancelled","recording":key}));
+                }
+                life.reception.remove(&key);
+                life.released.remove(&key);
+                life.finished.remove(&key);
+                life.closed.remove(&key);
+            }
+            Effect::Action(_) => {}
+        }
+        Ok(())
+    }
     fn release(&self, key: &str) -> Result<()> {
         let newly_released = self
             .lifecycle
@@ -379,7 +567,7 @@ impl Recognition {
             && !self.lifecycle.lock().unwrap().suppressed(&key)
         {
             emit(json!({"type":"audio_level", "recording":key,
-                "level":crate::audio_level::normalized(&part.samples)}));
+                "level":crate::audio_level::normalized_iter(part.samples.iter().copied())}));
         }
         if !self.audio.contains_key(&key) {
             let empty = part.final_part && part.samples.is_empty();
@@ -388,12 +576,12 @@ impl Recognition {
         let recording = self
             .audio
             .entry(key.clone())
-            .or_insert_with(|| (vec![], part.rate));
+            .or_insert_with(|| (Default::default(), part.rate));
         ensure!(
             recording.1 == part.rate,
             "Sample rate changed within recording"
         );
-        recording.0.extend_from_slice(&part.samples);
+        recording.0.append(&part.samples);
         if part.final_part {
             emit(json!({"type":"finalizing","recording":key}));
             self.release(&key)?;
@@ -433,10 +621,11 @@ impl Recognition {
     }
     async fn input(mut self, input: Arc<Mutex<Box<dyn InputAdapter>>>) -> Result<()> {
         let mut lines = BufReader::new(tokio::io::stdin()).lines();
-        let mut clock = tokio::time::interval(Duration::from_millis(50));
+        let mut clock = tokio::time::interval(Duration::from_millis(5));
         clock.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
             let events = tokio::select! {
+                biased;
                 line = lines.next_line() => {
                     let Some(line) = line? else { break };
                     let message: Value = serde_json::from_str(&line)?;
@@ -452,25 +641,20 @@ impl Recognition {
                     }
                     InputEvent::Checkpoint(value) => self.batch.send(Job::Checkpoint(value))?,
                     InputEvent::Audio(part) => self.add(part)?,
-                    InputEvent::Interrupted(key) => {
-                        self.release(&key)?;
-                        emit(json!({"type":"interrupted", "recording":key}));
+                    InputEvent::Reception { namespace, effect } => {
+                        self.reception(&namespace, effect)?
                     }
-                    InputEvent::Cancel(key) => {
-                        self.release(&key)?;
-                        self.audio.remove(&key);
-                        let mut life = self.lifecycle.lock().unwrap();
-                        life.finished.insert(key.clone());
-                        life.retire(&key);
-                        self.output.debug(format!("Recording cancelled key={key}; disconnect timeout=5s; no batch recognition"));
-                        emit(json!({"type":"cancelled", "recording":key}));
-                    }
-                    InputEvent::Activity { key, collecting } => {
-                        self.lifecycle.lock().unwrap().collecting = Some(collecting);
-                        self.output.debug(format!(
-                            "Recording activity key={key} collecting={collecting}"
-                        ));
-                        emit(json!({"type":"activity", "recording":key, "collecting":collecting}));
+                    InputEvent::Level { key, level } => {
+                        if self
+                            .lifecycle
+                            .lock()
+                            .unwrap()
+                            .reception
+                            .get(&key)
+                            .is_some_and(|s| s.visible && s.live)
+                        {
+                            emit(json!({"type":"audio_level", "recording":key, "level":level}));
+                        }
                     }
                     InputEvent::State(collecting) => self.state(collecting)?,
                     InputEvent::Discard(key) => self.discard(&key)?,
@@ -667,6 +851,65 @@ pub fn display_event(event: Value, output: &Output) -> Result<()> {
 #[cfg(test)]
 mod gui_tests {
     use super::*;
+    #[test]
+    fn reception_release_and_generation_are_per_recording_and_hidden_results_stay_hidden() {
+        use pebble_index::reception::{input_effects::Effect, session_state::Action};
+        let (mut r, _, _) = recognition();
+        // Keep receivers alive for the queued reset/release commands.
+        let (tx, _rx) = mpsc::unbounded_channel();
+        r.live = Some(tx);
+        {
+            let mut life = r.lifecycle.lock().unwrap();
+            life.collecting = Some(false); // Generic microphone state does not govern Index sessions.
+            life.reception.insert(
+                "ring-1".into(),
+                ReceptionControl {
+                    generation: 0,
+                    live: true,
+                    visible: true,
+                },
+            );
+            life.reception.insert(
+                "ring-2".into(),
+                ReceptionControl {
+                    generation: 0,
+                    live: true,
+                    visible: false,
+                },
+            );
+        }
+        r.reception("ring", Effect::StopLive(1)).unwrap();
+        {
+            let life = r.lifecycle.lock().unwrap();
+            assert!(!life.permits("ring-1", Some(0)));
+            assert!(life.permits("ring-2", Some(0)));
+            assert!(!life.visible("ring-2", Some(0)));
+        }
+        r.reception(
+            "ring",
+            Effect::ResetLive {
+                session: 2,
+                generation: 1,
+            },
+        )
+        .unwrap();
+        {
+            let life = r.lifecycle.lock().unwrap();
+            assert!(!life.permits("ring-2", Some(0)));
+            assert!(life.permits("ring-2", Some(1)));
+        }
+        r.reception(
+            "ring",
+            Effect::Action(Action::Retire {
+                session: 2,
+                sources: vec![],
+            }),
+        )
+        .unwrap();
+        let life = r.lifecycle.lock().unwrap();
+        assert!(!life.permits("ring-2", Some(1)));
+        assert!(!life.visible("ring-2", Some(1)));
+    }
     fn recognition() -> (
         Recognition,
         mpsc::UnboundedReceiver<Job>,
@@ -689,7 +932,7 @@ mod gui_tests {
     fn part(key: &str, samples: &[i16], final_part: bool) -> Part {
         Part {
             key: key.into(),
-            samples: samples.to_vec(),
+            samples: samples.to_vec().into(),
             rate: 9997,
             final_part,
             checkpoint: Some(json!(12)),
@@ -708,7 +951,10 @@ mod gui_tests {
         r.add(part("one", &[5], true)).unwrap();
         match batch.try_recv().unwrap() {
             Job::Audio(p, _) => {
-                assert_eq!(p.samples, [1, 2, 3, 4, 5]);
+                assert_eq!(
+                    p.samples.iter().copied().collect::<Vec<_>>(),
+                    [1, 2, 3, 4, 5]
+                );
                 assert!(p.final_part);
             }
             _ => panic!("expected complete batch"),

@@ -1,15 +1,17 @@
 /// RMS after removing DC, mapped from -55..-12 dBFS to a display envelope.
 /// This is visual feedback, not voice-activity detection or an ASR gate.
+#[cfg(test)]
 pub fn normalized(samples: &[i16]) -> f64 {
-    if samples.is_empty() {
+    normalized_iter(samples.iter().copied())
+}
+
+pub fn normalized_iter(samples: impl Iterator<Item = i16> + Clone) -> f64 {
+    let count = samples.clone().count();
+    if count == 0 {
         return 0.;
     }
-    let mean = samples.iter().map(|&s| s as f64).sum::<f64>() / samples.len() as f64;
-    let power = samples
-        .iter()
-        .map(|&s| (s as f64 - mean).powi(2))
-        .sum::<f64>()
-        / samples.len() as f64;
+    let mean = samples.clone().map(|s| s as f64).sum::<f64>() / count as f64;
+    let power = samples.map(|s| (s as f64 - mean).powi(2)).sum::<f64>() / count as f64;
     let rms = power.sqrt() / 32768.;
     if rms <= 0. {
         return 0.;
