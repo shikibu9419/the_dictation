@@ -88,6 +88,7 @@ impl Continuation {
         }
         let mut result = self.poll(output);
         match event {
+            InputEvent::Gesture(event) => result.push(InputEvent::Gesture(event)),
             InputEvent::State(pressed) => {
                 if pressed && !self.pressed {
                     if self.released.is_some_and(|t| t.elapsed() >= self.grace) {

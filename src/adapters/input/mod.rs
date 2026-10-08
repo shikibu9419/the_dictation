@@ -16,6 +16,7 @@ pub struct AudioChunk {
     pub checkpoint: Option<Value>,
 }
 pub enum InputEvent {
+    Gesture(gestures::GestureEvent),
     Audio(AudioChunk),
     State(bool),
     Discard(String),

@@ -59,16 +59,21 @@ final class PasteService {
                   "text": success ? "" : "クリップボードへコピーできませんでした"])
             return
         }
-        guard type == "paste", let text = message["text"] as? String else { return }
+        let currentClipboard = type == "paste_current"
+        guard currentClipboard || type == "paste" else { return }
+        guard currentClipboard || message["text"] is String else { return }
+        let text = message["text"] as? String ?? ""
         func result(_ success: Bool, _ detail: String) {
-            emit(["type": "paste_result", "request": id, "success": success, "text": detail])
+            emit(["type": currentClipboard ? "gesture_paste_result" : "paste_result", "request": id, "success": success, "text": detail])
         }
         guard !busy else { result(false, "Paste request already in progress"); return }
         busy = true
         defer { busy = false; targets.removeValue(forKey: id) }
-        NSPasteboard.general.clearContents()
-        guard NSPasteboard.general.setString(text, forType: .string) else {
-            result(false, "クリップボードへコピーできませんでした"); return
+        if !currentClipboard {
+            NSPasteboard.general.clearContents()
+            guard NSPasteboard.general.setString(text, forType: .string) else {
+                result(false, "クリップボードへコピーできませんでした"); return
+            }
         }
         guard let app = NSRunningApplication(processIdentifier: pid), !app.isTerminated, pid != getpid() else {
             result(false, "貼り付け先が閉じられています。文字はコピー済みです"); return

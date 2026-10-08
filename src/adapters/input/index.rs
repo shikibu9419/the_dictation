@@ -49,6 +49,7 @@ impl IndexInput {
                 let raw =
                     STANDARD.decode(message["raw"].as_str().context("Missing raw collection")?)?;
                 let parts = self.recordings.add(index, &raw, output)?;
+                let mut detected = None;
                 if self.gestures_live {
                     // Use explicit button metadata plus the existing short-audio
                     // classification. Do not count cumulative sequence entries
@@ -74,6 +75,7 @@ impl IndexInput {
                     if let Some(press) = press {
                         if let Some(event) = self.gestures.observe(index, press, Instant::now()) {
                             self.gesture_hooks.dispatch(event, output);
+                            detected = Some(InputEvent::Gesture(event));
                         }
                     }
                 }
@@ -92,6 +94,7 @@ impl IndexInput {
                             checkpoint: Some(json!(part.next)),
                         })
                     })
+                    .chain(detected)
                     .collect())
             }
             "boundary" => {
@@ -138,12 +141,14 @@ impl InputAdapter for IndexInput {
         Ok(result)
     }
     fn poll(&mut self, output: &Output) -> Result<Vec<InputEvent>> {
+        let mut result = self.continuation.poll(output);
         if self.gestures_live {
             if let Some(event) = self.gestures.poll(Instant::now()) {
                 self.gesture_hooks.dispatch(event, output);
+                result.push(InputEvent::Gesture(event));
             }
         }
-        Ok(self.continuation.poll(output))
+        Ok(result)
     }
     fn commit(&mut self, checkpoint: &Value) -> Result<()> {
         if self.save_cursor {
@@ -153,5 +158,59 @@ impl InputAdapter for IndexInput {
             )?;
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod gesture_tests {
+    use super::*;
+    fn short_collection(index: u16) -> Value {
+        let mut records = vec![80];
+        records.extend(8u32.to_le_bytes());
+        records.extend(16000u32.to_le_bytes());
+        records.extend([0, 0, 0, 0]);
+        records.push(83);
+        records.extend(8u16.to_le_bytes());
+        records.extend(0u32.to_le_bytes());
+        records.extend(1u32.to_le_bytes());
+        let mut raw = ((records.len() + 4) as u32).to_le_bytes().to_vec();
+        raw.extend(records);
+        json!({"type":"collection", "index":index, "raw":STANDARD.encode(raw)})
+    }
+    #[test]
+    fn only_live_taps_reach_the_ui_contract() {
+        let output = Output::new(false, None).unwrap();
+        let mut input = IndexInput::new("test", true).unwrap();
+        input.gestures = Detector::new(Duration::ZERO);
+        input.decode(short_collection(1), &output).unwrap();
+        assert!(
+            !input
+                .poll(&output)
+                .unwrap()
+                .iter()
+                .any(|e| matches!(e, InputEvent::Gesture(_)))
+        );
+        input.decode(json!({"type":"caught_up"}), &output).unwrap();
+        input.decode(short_collection(2), &output).unwrap();
+        let events = input.poll(&output).unwrap();
+        assert!(events.iter().any(|e| matches!(e, InputEvent::Gesture(g) if g.gesture == super::super::gestures::Gesture::SingleTap)));
+        assert!(
+            !input
+                .poll(&output)
+                .unwrap()
+                .iter()
+                .any(|e| matches!(e, InputEvent::Gesture(_)))
+        );
+        input
+            .decode(json!({"type":"connection_lost"}), &output)
+            .unwrap();
+        input.decode(short_collection(3), &output).unwrap();
+        assert!(
+            !input
+                .poll(&output)
+                .unwrap()
+                .iter()
+                .any(|e| matches!(e, InputEvent::Gesture(_)))
+        );
     }
 }

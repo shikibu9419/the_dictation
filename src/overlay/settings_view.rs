@@ -1,6 +1,6 @@
 use crate::{
     EVENTS, Message,
-    settings::{InputSource, Settings, SpeechModel},
+    settings::{GestureAction, InputSource, Settings, SpeechModel},
 };
 use gpui::{prelude::*, *};
 use std::path::PathBuf;
@@ -114,257 +114,360 @@ fn choice(id: &'static str, label: &'static str, selected: bool) -> Stateful<Div
 impl Render for SettingsView {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         div()
+            .id("settings-scroll")
             .size_full()
+            .overflow_y_scroll()
             .bg(rgb(0x1b1b1b))
-            .text_color(rgb(0xeeeeee))
-            .font_family(".AppleSystemUIFont")
-            .text_size(px(14.))
-            .p(px(28.))
-            .flex()
-            .flex_col()
-            .gap(px(18.))
-            .child(div().text_size(px(24.)).child("音声入力"))
             .child(
                 div()
+                    .min_h_full()
+                    .text_color(rgb(0xeeeeee))
+                    .font_family(".AppleSystemUIFont")
+                    .text_size(px(14.))
+                    .p(px(28.))
                     .flex()
                     .flex_col()
-                    .gap(px(8.))
-                    .child("入力デバイス")
+                    .gap(px(18.))
+                    .child(div().text_size(px(24.)).child("音声入力"))
                     .child(
-                        div()
-                            .flex()
-                            .gap(px(8.))
-                            .child(
-                                choice(
-                                    "input-index",
-                                    "Pebble Index",
-                                    self.settings.input == InputSource::Index,
-                                )
-                                .on_click(cx.listener(
-                                    |this, _, _, cx| this.choose_input(InputSource::Index, cx),
-                                )),
-                            )
-                            .child(
-                                choice(
-                                    "input-mic",
-                                    "PCマイク · 右Option",
-                                    self.settings.input == InputSource::Microphone,
-                                )
-                                .on_click(cx.listener(
-                                    |this, _, _, cx| this.choose_input(InputSource::Microphone, cx),
-                                )),
-                            ),
-                    )
-                    .child(
-                        div()
-                            .text_color(rgb(0xa2a2a2))
-                            .text_size(px(12.))
-                            .child("PCマイクは右Optionを押している間に録音します。"),
-                    ),
-            )
-            .child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap(px(8.))
-                    .child("ライブ認識モデル")
-                    .child(
-                        div()
-                            .flex()
-                            .gap(px(8.))
-                            .child(
-                                choice(
-                                    "engine-apple",
-                                    "SpeechAnalyzer",
-                                    self.settings.speech == SpeechModel::Apple,
-                                )
-                                .on_click(cx.listener(
-                                    |this, _, _, cx| this.choose_speech(SpeechModel::Apple, cx),
-                                )),
-                            )
-                            .child(
-                                choice(
-                                    "engine-on-device",
-                                    "On Device",
-                                    self.settings.speech == SpeechModel::OnDevice,
-                                )
-                                .on_click(cx.listener(
-                                    |this, _, _, cx| this.choose_speech(SpeechModel::OnDevice, cx),
-                                )),
-                            ),
-                    ),
-            )
-            .child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap(px(8.))
-                    .child("最終認識モデル")
-                    .child(
-                        div()
-                            .flex()
-                            .gap(px(8.))
-                            .child(
-                                choice(
-                                    "batch-apple",
-                                    "SpeechAnalyzer",
-                                    self.settings.recognition_plan().batch == SpeechModel::Apple,
-                                )
-                                .on_click(cx.listener(
-                                    |this, _, _, cx| {
-                                        this.settings.batch_speech = Some(SpeechModel::Apple);
-                                        cx.notify();
-                                    },
-                                )),
-                            )
-                            .child(
-                                choice(
-                                    "batch-device",
-                                    "Qwen3-ASR 1.7B",
-                                    self.settings.recognition_plan().batch == SpeechModel::OnDevice,
-                                )
-                                .on_click(cx.listener(
-                                    |this, _, _, cx| {
-                                        this.settings.batch_speech = Some(SpeechModel::OnDevice);
-                                        cx.notify();
-                                    },
-                                )),
-                            ),
-                    ),
-            )
-            .child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap(px(8.))
-                    .child("録音中の文字起こし")
-                    .child(
-                        div()
-                            .flex()
-                            .gap(px(8.))
-                            .child(
-                                choice(
-                                    "live-show",
-                                    "表示する",
-                                    self.settings.presentation.live_text,
-                                )
-                                .on_click(cx.listener(
-                                    |this, _, _, cx| {
-                                        this.settings.presentation.live_text = true;
-                                        cx.notify();
-                                    },
-                                )),
-                            )
-                            .child(
-                                choice(
-                                    "live-hide",
-                                    "非表示・ライブ認識しない",
-                                    !self.settings.presentation.live_text,
-                                )
-                                .on_click(cx.listener(
-                                    |this, _, _, cx| {
-                                        this.settings.presentation.live_text = false;
-                                        cx.notify();
-                                    },
-                                )),
-                            ),
-                    ),
-            )
-            .child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap(px(8.))
-                    .child("認識完了後の結果")
-                    .child(
-                        div()
-                            .flex()
-                            .gap(px(8.))
-                            .child(
-                                choice(
-                                    "final-show",
-                                    "表示して編集",
-                                    self.settings.presentation.final_text,
-                                )
-                                .on_click(cx.listener(
-                                    |this, _, _, cx| {
-                                        this.settings.presentation.final_text = true;
-                                        cx.notify();
-                                    },
-                                )),
-                            )
-                            .child(
-                                choice(
-                                    "final-hide",
-                                    "表示せず閉じる",
-                                    !self.settings.presentation.final_text,
-                                )
-                                .on_click(cx.listener(
-                                    |this, _, _, cx| {
-                                        this.settings.presentation.final_text = false;
-                                        cx.notify();
-                                    },
-                                )),
-                            ),
-                    )
-                    .child(
-                        div()
-                            .text_size(px(12.))
-                            .text_color(rgb(0xa2a2a2))
-                            .child("どちらも認識完了時にクリップボードへコピーします。"),
-                    ),
-            )
-            .when(
-                self.settings.speech == SpeechModel::OnDevice
-                    || self.settings.recognition_plan().batch == SpeechModel::OnDevice,
-                |d| {
-                    d.child(
                         div()
                             .flex()
                             .flex_col()
                             .gap(px(8.))
+                            .child("入力デバイス")
+                            .child(
+                                div()
+                                    .flex()
+                                    .gap(px(8.))
+                                    .child(
+                                        choice(
+                                            "input-index",
+                                            "Pebble Index",
+                                            self.settings.input == InputSource::Index,
+                                        )
+                                        .on_click(
+                                            cx.listener(|this, _, _, cx| {
+                                                this.choose_input(InputSource::Index, cx)
+                                            }),
+                                        ),
+                                    )
+                                    .child(
+                                        choice(
+                                            "input-mic",
+                                            "PCマイク · 右Option",
+                                            self.settings.input == InputSource::Microphone,
+                                        )
+                                        .on_click(
+                                            cx.listener(|this, _, _, cx| {
+                                                this.choose_input(InputSource::Microphone, cx)
+                                            }),
+                                        ),
+                                    ),
+                            )
+                            .child(
+                                div()
+                                    .text_color(rgb(0xa2a2a2))
+                                    .text_size(px(12.))
+                                    .child("PCマイクは右Optionを押している間に録音します。"),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap(px(8.))
+                            .child("ライブ認識モデル")
+                            .child(
+                                div()
+                                    .flex()
+                                    .gap(px(8.))
+                                    .child(
+                                        choice(
+                                            "engine-apple",
+                                            "SpeechAnalyzer",
+                                            self.settings.speech == SpeechModel::Apple,
+                                        )
+                                        .on_click(
+                                            cx.listener(|this, _, _, cx| {
+                                                this.choose_speech(SpeechModel::Apple, cx)
+                                            }),
+                                        ),
+                                    )
+                                    .child(
+                                        choice(
+                                            "engine-on-device",
+                                            "On Device",
+                                            self.settings.speech == SpeechModel::OnDevice,
+                                        )
+                                        .on_click(
+                                            cx.listener(|this, _, _, cx| {
+                                                this.choose_speech(SpeechModel::OnDevice, cx)
+                                            }),
+                                        ),
+                                    ),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap(px(8.))
+                            .child("最終認識モデル")
+                            .child(
+                                div()
+                                    .flex()
+                                    .gap(px(8.))
+                                    .child(
+                                        choice(
+                                            "batch-apple",
+                                            "SpeechAnalyzer",
+                                            self.settings.recognition_plan().batch
+                                                == SpeechModel::Apple,
+                                        )
+                                        .on_click(
+                                            cx.listener(|this, _, _, cx| {
+                                                this.settings.batch_speech =
+                                                    Some(SpeechModel::Apple);
+                                                cx.notify();
+                                            }),
+                                        ),
+                                    )
+                                    .child(
+                                        choice(
+                                            "batch-device",
+                                            "Qwen3-ASR 1.7B",
+                                            self.settings.recognition_plan().batch
+                                                == SpeechModel::OnDevice,
+                                        )
+                                        .on_click(
+                                            cx.listener(|this, _, _, cx| {
+                                                this.settings.batch_speech =
+                                                    Some(SpeechModel::OnDevice);
+                                                cx.notify();
+                                            }),
+                                        ),
+                                    ),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap(px(8.))
+                            .child("録音中の文字起こし")
+                            .child(
+                                div()
+                                    .flex()
+                                    .gap(px(8.))
+                                    .child(
+                                        choice(
+                                            "live-show",
+                                            "表示する",
+                                            self.settings.presentation.live_text,
+                                        )
+                                        .on_click(
+                                            cx.listener(|this, _, _, cx| {
+                                                this.settings.presentation.live_text = true;
+                                                cx.notify();
+                                            }),
+                                        ),
+                                    )
+                                    .child(
+                                        choice(
+                                            "live-hide",
+                                            "非表示・ライブ認識しない",
+                                            !self.settings.presentation.live_text,
+                                        )
+                                        .on_click(
+                                            cx.listener(|this, _, _, cx| {
+                                                this.settings.presentation.live_text = false;
+                                                cx.notify();
+                                            }),
+                                        ),
+                                    ),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap(px(8.))
+                            .child("認識完了後の結果")
+                            .child(
+                                div()
+                                    .flex()
+                                    .gap(px(8.))
+                                    .child(
+                                        choice(
+                                            "final-show",
+                                            "表示して編集",
+                                            self.settings.presentation.final_text,
+                                        )
+                                        .on_click(
+                                            cx.listener(|this, _, _, cx| {
+                                                this.settings.presentation.final_text = true;
+                                                cx.notify();
+                                            }),
+                                        ),
+                                    )
+                                    .child(
+                                        choice(
+                                            "final-hide",
+                                            "表示せず閉じる",
+                                            !self.settings.presentation.final_text,
+                                        )
+                                        .on_click(
+                                            cx.listener(|this, _, _, cx| {
+                                                this.settings.presentation.final_text = false;
+                                                cx.notify();
+                                            }),
+                                        ),
+                                    ),
+                            )
                             .child(
                                 div()
                                     .text_size(px(12.))
                                     .text_color(rgb(0xa2a2a2))
-                                    .child("Qwen3-ASR 1.7B · MLX。初回に約2.2 GBを取得します。"),
-                            )
-                            .child(
-                                div()
-                                    .id("download-model")
-                                    .cursor_pointer()
-                                    .py(px(8.))
-                                    .child(if self.downloading {
-                                        "ダウンロード中…"
-                                    } else if Settings::qwen_ready() {
-                                        "モデルを再確認"
-                                    } else {
-                                        "モデルをダウンロード"
-                                    })
-                                    .on_click(cx.listener(|this, _, _, cx| this.download(cx))),
+                                    .child("どちらも認識完了時にクリップボードへコピーします。"),
                             ),
                     )
-                },
-            )
-            .when_some(self.error.clone(), |d, error| {
-                d.child(
-                    div()
-                        .text_size(px(12.))
-                        .text_color(rgb(0xdddddd))
-                        .child(error),
-                )
-            })
-            .child(div().flex_1())
-            .child(
-                div()
-                    .id("save-settings")
-                    .cursor_pointer()
-                    .rounded(px(10.))
-                    .px(px(16.))
-                    .py(px(12.))
-                    .bg(rgb(0x484848))
-                    .child("保存して切り替える")
-                    .on_click(cx.listener(|this, _, window, cx| this.save(window, cx))),
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap(px(8.))
+                            .child("シングルタップ")
+                            .child(
+                                div()
+                                    .flex()
+                                    .gap(px(8.))
+                                    .child(
+                                        choice(
+                                            "single_tap-history",
+                                            "履歴を開く",
+                                            self.settings.gestures.single_tap
+                                                == GestureAction::History,
+                                        )
+                                        .on_click(
+                                            cx.listener(|this, _, _, cx| {
+                                                this.settings.gestures.single_tap =
+                                                    GestureAction::History;
+                                                cx.notify();
+                                            }),
+                                        ),
+                                    )
+                                    .child(
+                                        choice(
+                                            "single_tap-paste",
+                                            "現在の入力先へペースト",
+                                            self.settings.gestures.single_tap
+                                                == GestureAction::Paste,
+                                        )
+                                        .on_click(
+                                            cx.listener(|this, _, _, cx| {
+                                                this.settings.gestures.single_tap =
+                                                    GestureAction::Paste;
+                                                cx.notify();
+                                            }),
+                                        ),
+                                    ),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap(px(8.))
+                            .child("ダブルタップ")
+                            .child(
+                                div()
+                                    .flex()
+                                    .gap(px(8.))
+                                    .child(
+                                        choice(
+                                            "double_tap-history",
+                                            "履歴を開く",
+                                            self.settings.gestures.double_tap
+                                                == GestureAction::History,
+                                        )
+                                        .on_click(
+                                            cx.listener(|this, _, _, cx| {
+                                                this.settings.gestures.double_tap =
+                                                    GestureAction::History;
+                                                cx.notify();
+                                            }),
+                                        ),
+                                    )
+                                    .child(
+                                        choice(
+                                            "double_tap-paste",
+                                            "現在の入力先へペースト",
+                                            self.settings.gestures.double_tap
+                                                == GestureAction::Paste,
+                                        )
+                                        .on_click(
+                                            cx.listener(|this, _, _, cx| {
+                                                this.settings.gestures.double_tap =
+                                                    GestureAction::Paste;
+                                                cx.notify();
+                                            }),
+                                        ),
+                                    ),
+                            ),
+                    )
+                    .when(
+                        self.settings.speech == SpeechModel::OnDevice
+                            || self.settings.recognition_plan().batch == SpeechModel::OnDevice,
+                        |d| {
+                            d.child(
+                                div()
+                                    .flex()
+                                    .flex_col()
+                                    .gap(px(8.))
+                                    .child(
+                                        div().text_size(px(12.)).text_color(rgb(0xa2a2a2)).child(
+                                            "Qwen3-ASR 1.7B · MLX。初回に約2.2 GBを取得します。",
+                                        ),
+                                    )
+                                    .child(
+                                        div()
+                                            .id("download-model")
+                                            .cursor_pointer()
+                                            .py(px(8.))
+                                            .child(if self.downloading {
+                                                "ダウンロード中…"
+                                            } else if Settings::qwen_ready() {
+                                                "モデルを再確認"
+                                            } else {
+                                                "モデルをダウンロード"
+                                            })
+                                            .on_click(
+                                                cx.listener(|this, _, _, cx| this.download(cx)),
+                                            ),
+                                    ),
+                            )
+                        },
+                    )
+                    .when_some(self.error.clone(), |d, error| {
+                        d.child(
+                            div()
+                                .text_size(px(12.))
+                                .text_color(rgb(0xdddddd))
+                                .child(error),
+                        )
+                    })
+                    .child(div().flex_1())
+                    .child(
+                        div()
+                            .id("save-settings")
+                            .cursor_pointer()
+                            .rounded(px(10.))
+                            .px(px(16.))
+                            .py(px(12.))
+                            .bg(rgb(0x484848))
+                            .child("保存して切り替える")
+                            .on_click(cx.listener(|this, _, window, cx| this.save(window, cx))),
+                    ),
             )
     }
 }

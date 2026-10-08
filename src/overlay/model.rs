@@ -247,7 +247,7 @@ impl Model {
     }
     pub fn open_history(&mut self, target: i32) {
         self.active = None;
-        self.browse(true, target);
+        if !self.browse(true, target) { self.add(None, Phase::Ready, target); }
     }
     pub fn edit(&mut self, id: u64, text: String) {
         if let Some(item) = self
@@ -283,6 +283,27 @@ mod tests {
             m,
             json!({"type":"text","recording":key,"text":text,"mode":mode,"final":final_result}),
         );
+    }
+    #[test]
+    fn history_action_can_open_an_empty_editor_without_saving_empty_history() {
+        let mut model = Model::default();
+        model.open_history(42);
+        assert_eq!(model.visible().unwrap().phase, Phase::Ready);
+        assert_eq!(model.visible().unwrap().text, "");
+        assert!(model.history().is_empty());
+    }
+    #[test]
+    fn delayed_empty_tap_completion_does_not_close_open_history() {
+        let mut m = Model::default();
+        m.restore_history(vec!["previous transcript".into()]);
+        state(&mut m, true);
+        begin(&mut m, "tap");
+        let tap = m.visible().unwrap().id;
+        m.open_history(42);
+        text(&mut m, "tap", "", "batch", true);
+        m.dismiss_id(tap);
+        assert_eq!(m.visible().unwrap().text, "previous transcript");
+        assert_eq!(m.history(), vec!["previous transcript"]);
     }
     #[test]
     fn ble_edges_live_release_and_full_result() {

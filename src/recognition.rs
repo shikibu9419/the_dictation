@@ -404,6 +404,8 @@ impl Recognition {
             };
             for event in events {
                 match event {
+                    InputEvent::Gesture(event) => emit(json!({"type":"gesture", "gesture":event.gesture,
+                        "first_collection":event.first_collection, "last_collection":event.last_collection})),
                     InputEvent::Audio(part) => self.add(part)?,
                     InputEvent::State(collecting) => self.state(collecting)?,
                     InputEvent::Discard(key) => self.discard(&key)?,

@@ -147,7 +147,7 @@ fn read_events(reader: impl BufRead, generation: Option<u64>) {
                 if let Ok(value) = serde_json::from_str::<serde_json::Value>(&line)
                     && matches!(
                         value["type"].as_str(),
-                        Some("paste_result" | "copy_result" | "paste_permission" | "audio_level")
+                        Some("paste_result" | "copy_result" | "paste_permission" | "audio_level" | "gesture" | "gesture_paste_result")
                     )
                 {
                     if tx
@@ -190,6 +190,8 @@ struct Overlay {
     panel_circular: bool,
     presentation: settings::Presentation,
     copied: std::collections::HashSet<String>,
+    gestures: settings::GestureBindings,
+    gesture_request: u64,
     settings_window: Option<WindowHandle<settings_view::SettingsView>>,
     _subscriptions: Vec<Subscription>,
 }
@@ -352,15 +354,34 @@ impl Overlay {
                             }
                         }
                     }
-                    if !self.presentation.final_text { self.model.dismiss_id(id); }
+                    if !self.presentation.final_text || self.model.items.iter().any(|i| i.id == id && i.text.trim().is_empty()) { self.model.dismiss_id(id); }
                 }
             }
         }
         self.update_panel(window, cx);
     }
+    fn gesture(&mut self, event: &serde_json::Value, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(action) = event["gesture"].as_str().and_then(|name| self.gestures.action(name)) else { return; };
+        let target = unsafe { index_frontmost_pid() };
+        match action {
+            settings::GestureAction::History => {
+                self.model.open_history(target);
+                self.update_panel(window, cx);
+            }
+            settings::GestureAction::Paste => {
+                self.gesture_request += 1;
+                if let Some(backend) = &mut self.backend {
+                    if let Err(error) = backend.send(serde_json::json!({"type":"paste_current",
+                        "request":self.gesture_request, "target":target})) {
+                        eprintln!("[GUI] Gesture paste failed: {error}");
+                    }
+                }
+            }
+        }
+    }
     fn start(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         match settings::Settings::load() {
-            Ok(settings) => self.presentation = settings.presentation,
+            Ok(settings) => { self.presentation = settings.presentation; self.gestures = settings.gestures; },
             Err(error) => { self.event(Event::error(format!("設定を読み込めませんでした: {error}")), window, cx); return; }
         }
         self.copied.clear();
@@ -714,7 +735,7 @@ fn main() -> anyhow::Result<()> {
                         cx.notify();
                     }
                 });
-                let mut view = Overlay { model: load_model(), focus: cx.focus_handle(), backend: None, backend_path, verbose, shown: false, shown_item: None, pasting: false, log, scroll: ScrollHandle::new(), input, editing: None, panel_height: 0., panel_circular: false, presentation: settings::Settings::load().map(|s| s.presentation).unwrap_or_default(), copied: Default::default(), settings_window: None, _subscriptions: vec![subscription] };
+                let mut view = Overlay { model: load_model(), focus: cx.focus_handle(), backend: None, backend_path, verbose, shown: false, shown_item: None, pasting: false, log, scroll: ScrollHandle::new(), input, editing: None, panel_height: 0., panel_circular: false, presentation: settings::Settings::load().map(|s| s.presentation).unwrap_or_default(), copied: Default::default(), gestures: settings::Settings::load().map(|s| s.gestures).unwrap_or_default(), gesture_request: 1_000_000_000, settings_window: None, _subscriptions: vec![subscription] };
                 if !preview { view.start(window, cx); }
                 cx.spawn_in(window, async move |this, cx| {
                     while let Some(message) = events.next().await {
@@ -727,6 +748,7 @@ fn main() -> anyhow::Result<()> {
                             }
                             Message::Menu(1) => { if let Some(backend) = &mut this.backend { let _ = backend.send(serde_json::json!({"type":"permission"})); } else { unsafe { index_permission(); } } },
                             Message::Control(event, generation) if accepts_generation(this.backend.as_ref().map(|b| b.generation), generation) => {
+                                if event["type"] == "gesture" { this.gesture(&event, window, cx); }
                                 if event["type"] == "audio_level" {
                                     let active = !this.presentation.live_text && this.model.visible().is_some_and(|item|
                                         item.phase == Phase::Recording && (item.recording.is_none() || item.recording.as_deref() == event["recording"].as_str()));

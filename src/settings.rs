@@ -28,6 +28,37 @@ pub struct Settings {
     /// None preserves the model chosen by older settings files.
     pub batch_speech: Option<SpeechModel>,
     pub presentation: Presentation,
+    pub gestures: GestureBindings,
+}
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum GestureAction {
+    #[default]
+    History,
+    Paste,
+}
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(default, deny_unknown_fields)]
+pub struct GestureBindings {
+    pub single_tap: GestureAction,
+    pub double_tap: GestureAction,
+}
+impl GestureBindings {
+    pub fn action(&self, gesture: &str) -> Option<GestureAction> {
+        match gesture {
+            "single_tap" => Some(self.single_tap),
+            "double_tap" => Some(self.double_tap),
+            _ => None,
+        }
+    }
+}
+impl Default for GestureBindings {
+    fn default() -> Self {
+        Self {
+            single_tap: GestureAction::History,
+            double_tap: GestureAction::Paste,
+        }
+    }
 }
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(default, deny_unknown_fields)]
@@ -36,7 +67,12 @@ pub struct Presentation {
     pub final_text: bool,
 }
 impl Default for Presentation {
-    fn default() -> Self { Self { live_text: true, final_text: true } }
+    fn default() -> Self {
+        Self {
+            live_text: true,
+            final_text: true,
+        }
+    }
 }
 #[derive(Clone, Copy, Debug)]
 pub struct RecognitionPlan {
@@ -155,14 +191,20 @@ mod tests {
     #[test]
     fn legacy_settings_keep_the_selected_model_for_both_engines() {
         let settings: Settings = serde_json::from_str(r#"{"speech":"on_device"}"#).unwrap();
-        assert_eq!(settings.recognition_plan().live, Some(SpeechModel::OnDevice));
+        assert_eq!(
+            settings.recognition_plan().live,
+            Some(SpeechModel::OnDevice)
+        );
         assert_eq!(settings.recognition_plan().batch, SpeechModel::OnDevice);
         assert!(settings.presentation.final_text);
     }
     #[test]
     fn display_options_do_not_change_batch_model_selection() {
-        let mut settings = Settings { speech: SpeechModel::Apple,
-            batch_speech: Some(SpeechModel::OnDevice), ..Settings::default() };
+        let mut settings = Settings {
+            speech: SpeechModel::Apple,
+            batch_speech: Some(SpeechModel::OnDevice),
+            ..Settings::default()
+        };
         settings.presentation.live_text = false;
         settings.presentation.final_text = false;
         assert_eq!(settings.recognition_plan().live, None);
@@ -170,6 +212,35 @@ mod tests {
         settings.presentation.live_text = true;
         assert_eq!(settings.recognition_plan().live, Some(SpeechModel::Apple));
         assert_eq!(settings.recognition_plan().batch, SpeechModel::OnDevice);
+    }
+    #[test]
+    fn gesture_actions_are_independent_and_persisted() {
+        let defaults = Settings::default();
+        assert_eq!(
+            defaults.gestures.action("single_tap"),
+            Some(GestureAction::History)
+        );
+        assert_eq!(
+            defaults.gestures.action("double_tap"),
+            Some(GestureAction::Paste)
+        );
+        assert_eq!(defaults.gestures.action("triple_tap"), None);
+        for single_tap in [GestureAction::History, GestureAction::Paste] {
+            for double_tap in [GestureAction::History, GestureAction::Paste] {
+                let value = Settings {
+                    gestures: GestureBindings {
+                        single_tap,
+                        double_tap,
+                    },
+                    ..Settings::default()
+                };
+                let restored: Settings =
+                    serde_json::from_slice(&serde_json::to_vec(&value).unwrap()).unwrap();
+                assert_eq!(restored.gestures, value.gestures);
+                assert_eq!(restored.gestures.action("single_tap"), Some(single_tap));
+                assert_eq!(restored.gestures.action("double_tap"), Some(double_tap));
+            }
+        }
     }
     #[test]
     fn corrupt_settings_are_not_silently_replaced() {

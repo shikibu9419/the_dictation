@@ -3,7 +3,8 @@
 use crate::output::Output;
 use std::time::{Duration, Instant};
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Gesture {
     SingleTap,
     DoubleTap,
@@ -119,5 +120,44 @@ impl GestureHook for LogHook {
             "Gesture {:?}: collections={}..{} (receiver timing)",
             event.gesture, event.first_collection, event.last_collection
         ));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn single_double_and_hold_are_exclusive() {
+        let now = Instant::now();
+        let mut d = Detector::new(Duration::from_millis(500));
+        assert!(d.observe(10, Press::Short, now).is_none());
+        assert!(d.poll(now + Duration::from_millis(499)).is_none());
+        assert_eq!(
+            d.poll(now + Duration::from_millis(500)).unwrap().gesture,
+            Gesture::SingleTap
+        );
+        assert!(d.poll(now + Duration::from_secs(2)).is_none());
+        d.observe(11, Press::Short, now + Duration::from_secs(2));
+        d.observe(12, Press::Short, now + Duration::from_millis(2200));
+        assert_eq!(
+            d.poll(now + Duration::from_millis(2700)).unwrap().gesture,
+            Gesture::DoubleTap
+        );
+        d.observe(13, Press::Short, now + Duration::from_secs(3));
+        d.observe(14, Press::Hold, now + Duration::from_millis(3200));
+        assert!(d.poll(now + Duration::from_secs(4)).is_none());
+    }
+    #[test]
+    fn replay_disconnect_and_triple_taps_do_not_trigger_actions() {
+        let now = Instant::now();
+        let mut d = Detector::new(Duration::from_millis(500));
+        d.observe(65535, Press::Short, now);
+        d.observe(65535, Press::Short, now);
+        d.observe(0, Press::Short, now);
+        d.observe(1, Press::Short, now);
+        assert!(d.poll(now + Duration::from_secs(1)).is_none());
+        d.observe(2, Press::Short, now + Duration::from_secs(2));
+        d.reset();
+        assert!(d.poll(now + Duration::from_secs(3)).is_none());
     }
 }
