@@ -1,5 +1,7 @@
 mod model;
 mod presentation;
+#[path = "../qwen_runtime.rs"]
+mod qwen_runtime;
 #[path = "../settings.rs"]
 mod settings;
 mod settings_view;

@@ -2,8 +2,9 @@
 
 Rust library for Qwen3-ASR 1.7B on Apple Silicon, using the MLX C API and Metal.
 This crate implements the inference core and a resident JSONL worker, `QwenNative`.
-The application's Python adapter has **not yet been replaced**. The model installer,
-parent scheduling, and app-bundle integration are subsequent steps.
+The application invokes this worker directly. `setup-qwen` verifies the pinned model;
+`build-app.sh` bundles the executable and `mlx.metallib`. Parent scheduling is a
+separate implementation step.
 
 The fixed checkpoint is `moona3k/mlx-qwen3-asr-1.7b-8bit`, revision
 `22c8abe6a6772122dda5905967d7496d1d3e8dd2`. Packed 8-bit/group-64 encoder,
@@ -22,6 +23,8 @@ cargo clippy --release --all-targets -- -D warnings
 ```
 
 The first build fetches the pinned MLX source and compiles the native libraries.
+It also places `mlx.metallib` in the profile directory alongside `QwenNative`; keep
+these two files together when distributing the worker.
 The unit test covers periodic Hann/STFT/mel reference values, float16 activations,
 packed quantized linear/embedding operations, scalar/data access, and error handling.
 MLX arrays and compiled closures stay on their inference thread.

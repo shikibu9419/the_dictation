@@ -44,6 +44,7 @@ pub struct GestureBindings {
     pub double_tap: GestureAction,
 }
 impl GestureBindings {
+    #[allow(dead_code)] // Used by the GUI; the CLI shares this settings module.
     pub fn action(&self, gesture: &str) -> Option<GestureAction> {
         match gesture {
             "single_tap" => Some(self.single_tap),
@@ -92,15 +93,7 @@ impl Settings {
             .join("Library/Application Support/Index Voice/qwen-mlx")
     }
     pub fn qwen_ready() -> bool {
-        let root = Self::qwen_dir();
-        root.join(".venv/bin/python").is_file()
-            && root.join("model/config.json").is_file()
-            && root.join("model/weights.safetensors").is_file()
-            && root.join("model/vocab.json").is_file()
-            && root.join("model/merges.txt").is_file()
-            && root.join("model/tokenizer_config.json").is_file()
-            && std::fs::read_to_string(root.join("ready"))
-                .is_ok_and(|revision| revision == "22c8abe6a6772122dda5905967d7496d1d3e8dd2")
+        crate::qwen_runtime::ready(&Self::qwen_dir())
     }
     pub fn path() -> PathBuf {
         std::env::var_os("XDG_CONFIG_HOME")

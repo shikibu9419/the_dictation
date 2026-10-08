@@ -10,3 +10,7 @@ Pebble Index 01. Product names and trademarks belong to their owners.
 Third-party libraries, downloaded speech models and platform SDKs retain
 their respective licenses and notices. This license does not relicense
 the parent mobileapp repository or any other third-party work.
+
+The native Qwen worker includes code derived from second-state/qwen3_asr_rs
+(Apache-2.0) and links MLX and mlx-c (MIT). Their notices and licenses are
+in native/qwen-rs/ and in the app bundle's Resources/qwen/ directory.

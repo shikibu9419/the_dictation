@@ -7,8 +7,8 @@
 ネイティブ化そのものによる高速化は確認できていない。37.86秒の入力ではPythonより約9%遅い。
 
 これはアプリへの切替完了を意味しない。有限窓のlive制御、全文の区間処理、常駐JSONL worker、
-resampler/発声開始ゲートは追加した。親の実行枠によるlive優先、モデル取得・app bundleへの組込みは未完了。
-BLE・状態機械の変更も別段階で実装する。現行アプリはPython経路を使用している。
+resampler/発声開始ゲートは追加した。モデル取得・app bundleへの組込みも移行した。親の実行枠によるlive優先は未完了。
+BLE・状態機械の変更も別段階で実装する。現在のソースはネイティブworkerを呼び出す。
 
 ## 実装と互換修正
 
@@ -102,8 +102,17 @@ cache reset、開始前と認識途中のcancel、その後の正常な再認識
 長い無音末尾で認識済み本文を消さないこと、全区間の連続性を確認する。
 実行コマンド: `cargo test --release --test worker_runtime -- --ignored --nocapture --test-threads=1`。
 
+## アプリ接続と配布の確認
+
+- `ProcessEngine` は直接 `QwenNative` を起動。受信結果のversion・録音ID・世代・消費位置を検査し、キャンセル送信時点から旧結果を破棄する。外部アダプターは既存JSONLのまま使用できる。
+- `setup-qwen` はRustでSHA-256を確認し、不足ファイルだけcurlで取得する。旧Python/uvアダプターを削除。既存のモデルや旧venvは削除しない。
+- 実モデルを一時ディレクトリから参照し、セットアップ2回、連続認識2回、cancel後の空final、EOF終了をアダプター経由で確認した。ユーザーの設定・保存モデルは変更していない。
+- 一時ディレクトリへappをビルド。`QwenNative` と `mlx.metallib`、ライセンスの同梱、Metalリソースを含む署名、`codesign --verify --deep --strict`を確認した。`otool -L`で依存先はmacOSのシステムライブラリのみ。アプリは起動していない。
+- 親の通常unit 88件、外部アダプター/CLI互換テスト7件が通過。`cargo clippy --all-targets -- -D warnings`も通過。
+- 署名済みapp内の `QwenNative` を指定したアダプターの実モデルテストも通過。モデル検証2回を含むreleaseテストは23.02秒。GUI、BLE、マイクは起動していない。
+- ワーカーの測定値は [qwen-native-worker-benchmark.json](qwen-native-worker-benchmark.json) に保存した。
+
 ## 残る受入条件
 
 - 親からのsession/generation管理とlive/batch実行枠を接続して、競合時の遅延を評価する。
-- モデル取得とリソース同梱を移行してからPython起動経路を削除する。
 - BLEの音声保持と状態管理の変更を接続し、入力から認識までを別途確認する。

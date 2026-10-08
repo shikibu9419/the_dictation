@@ -1,7 +1,7 @@
 use crate::{
     adapters::{
         input::{self, AudioChunk as Part, InputAdapter, InputEvent},
-        speech::{self, EngineCommand, EngineEvent, SpeechEngine},
+        speech::{self, EngineCommand, EngineReply, SpeechEngine},
     },
     helper::{Helper, ProcessGroup},
     output::Output,
@@ -94,7 +94,7 @@ impl Speech {
         };
         loop {
             let event = speech.engine.event().await?;
-            let ready = matches!(event, EngineEvent::Ready);
+            let ready = event.kind() == "ready";
             speech.event(event)?;
             if ready {
                 speech.output.debug(format!(
@@ -108,7 +108,7 @@ impl Speech {
         }
         Ok(speech)
     }
-    fn event(&mut self, event: EngineEvent) -> Result<()> {
+    fn event(&mut self, event: EngineReply) -> Result<()> {
         let event = serde_json::to_value(event)?;
         let kind = event["type"].as_str().unwrap_or("");
         if kind == "error" {
@@ -120,6 +120,10 @@ impl Speech {
                 self.mode,
                 event["text"].as_str().unwrap_or("")
             ));
+            if event.get("consumed_samples").is_some() || event.get("peak_memory_bytes").is_some() {
+                self.output
+                    .debug(format!("[{}] engine metrics: {event}", self.mode));
+            }
             if let (Some(start), Some(end)) = (
                 event["segment_start"].as_f64(),
                 event["segment_end"].as_f64(),
@@ -382,10 +386,11 @@ impl Recognition {
                 },
                 Instant::now(),
             ))?;
-        } else if !part.samples.is_empty() && !self.lifecycle.lock().unwrap().suppressed(&key) {
-            if let Some(live) = &self.live {
-                live.send(Job::Audio(part, Instant::now()))?;
-            }
+        } else if !part.samples.is_empty()
+            && !self.lifecycle.lock().unwrap().suppressed(&key)
+            && let Some(live) = &self.live
+        {
+            live.send(Job::Audio(part, Instant::now()))?;
         }
         Ok(())
     }

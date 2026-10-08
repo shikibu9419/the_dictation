@@ -13,6 +13,7 @@ mod helper;
 mod model_download;
 mod output;
 mod pairing;
+mod qwen_runtime;
 mod qwen_setup;
 mod recognition;
 mod recordings;

@@ -1,3 +1,4 @@
+mod native_session;
 mod process;
 pub mod whisper;
 
@@ -34,6 +35,49 @@ pub enum EngineEvent {
         text: String,
     },
 }
+/// Preserve cursor/timing fields from native adapters while accepting legacy
+/// adapters with no protocol metadata.
+#[derive(Debug, Deserialize, Serialize)]
+pub struct EngineReply {
+    #[serde(flatten)]
+    pub event: EngineEvent,
+    #[serde(flatten)]
+    pub metadata: EngineMetadata,
+}
+#[derive(Debug, Default, Deserialize, Serialize)]
+pub struct EngineMetadata {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub protocol_version: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub generation: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub accepted_samples: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub consumed_samples: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sample_rate: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub window_samples: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub window_rate: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub decode_seconds: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub peak_memory_bytes: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub capabilities: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub permitted: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub paused: Option<bool>,
+}
+impl EngineReply {
+    pub fn kind(&self) -> &'static str {
+        self.event.kind()
+    }
+}
 impl EngineEvent {
     pub fn kind(&self) -> &'static str {
         match self {
@@ -50,7 +94,7 @@ impl EngineEvent {
 pub trait SpeechEngine: Send {
     fn name(&self) -> &str;
     fn send(&mut self, command: EngineCommand) -> Reply<'_, ()>;
-    fn event(&mut self) -> Reply<'_, EngineEvent>;
+    fn event(&mut self) -> Reply<'_, EngineReply>;
     fn close(&mut self) -> Reply<'_, ()>;
 }
 
@@ -71,4 +115,23 @@ pub async fn create(
     Ok(Box::new(
         process::ProcessEngine::start(config, language, mode, output).await?,
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+    #[test]
+    fn reply_preserves_native_cursors_and_legacy_messages() {
+        let value = json!({"type":"status","text":"consumed","protocol_version":2,"session_id":7,"generation":8,"consumed_samples":16000,"segment_start":0.0,"segment_end":1.0});
+        let reply: EngineReply = serde_json::from_value(value.clone()).unwrap();
+        assert_eq!(reply.kind(), "status");
+        assert_eq!(serde_json::to_value(reply).unwrap(), value);
+        let reply: EngineReply = serde_json::from_value(json!({"type":"ready"})).unwrap();
+        assert_eq!(reply.kind(), "ready");
+        assert_eq!(
+            serde_json::to_value(reply).unwrap(),
+            json!({"type":"ready"})
+        );
+    }
 }

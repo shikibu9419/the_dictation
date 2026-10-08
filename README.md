@@ -3,7 +3,7 @@
 > **非公式・自己責任での利用について**  
 > このソフトウェアは、Pebble Index 01をMacへ直接接続して使用する非公式の実装です。メーカーが提供する本来の利用方法とは異なります。使用・改変・開発は、ご自身の責任で行ってください。動作やデータの保全を保証するものではありません。
 
-Index 01の音声をMacへBLE転送し、標準で **Apple SpeechAnalyzer / SpeechTranscriber** を使って文字起こしします。通常起動・Webhook・ファイル文字起こしは共通の認識アダプターを使います。SpeechAnalyzerの実行にはPython・uvは不要です。On Device（Qwen3-ASR MLX）のみ専用のPython環境を使います（旧`desktop/python`には依存しません）。
+Index 01の音声をMacへBLE転送し、標準で **Apple SpeechAnalyzer / SpeechTranscriber** を使って文字起こしします。通常起動・Webhook・ファイル文字起こしは共通の認識アダプターを使います。SpeechAnalyzerとOn Device（Qwen3-ASR MLX）はどちらもPython・uvなしで実行します。旧`desktop/python`には依存しません。
 
 この独立した `desktop/rust` リポジトリの独自実装は **Apache License 2.0** で提供します。[LICENSE](LICENSE) と [NOTICE](NOTICE) を参照してください。依存ライブラリ・モデル・Apple SDK等にはそれぞれのライセンス・利用条件が適用されます。親の `mobileapp` や他のリポジトリのライセンスを変更するものではありません。
 
@@ -12,12 +12,12 @@ Index 01の音声をMacへBLE転送し、標準で **Apple SpeechAnalyzer / Spee
 - macOS 26以降（SpeechAnalyzerを使う場合はSpeechTranscriber対応Mac）
 - Xcode 26以降（初回起動のセットアップを済ませ、Command Line Toolsに選択）
 - Rust 1.92以降とCargo
-- CMake（Whisperのネイティブ部分のビルド用。未導入なら `brew install cmake`）
+- CMake（MLX等のネイティブ部分のビルド用。未導入なら `brew install cmake`）
 - Pebble Index 01、またはMacに接続されたマイク
 
 初回はCargo依存関係とAppleの音声モデルの取得にインターネット接続が必要です。Apple APIを呼ぶSwiftヘルパーは初回実行時にビルドし、以降はキャッシュを使います。SwiftソースはRustバイナリへ埋め込まれるため、実行時にこのリポジトリのソースを探す必要はありません。
 
-On Deviceを選ぶ場合は、[uv](https://docs.astral.sh/uv/getting-started/installation/)が必要です。設定画面の「モデルをダウンロード」で専用環境とモデルを用意します。認識中に音声をサーバーへ送信することはありません。
+On DeviceはApple Siliconを使用します。配布用appにはQwenNativeとMetalリソースを同梱し、設定画面の「モデルをダウンロード」でモデルを用意します。ソースからCLIを使う場合は、下記のQwenNativeビルドも行ってください。認識中に音声をサーバーへ送信することはありません。
 
 ## ビルド・起動
 
@@ -106,13 +106,16 @@ open "target/Index Voice.app"
 - **Pebble Index**：保存したリングUUIDへ接続します。
 - **PCマイク · 右Option**：右Optionを押している間の音声を取り込み、離すとライブ認識を止めて全文を再認識します。左Optionでは録音しません。macOSの「マイク」と「入力監視」の許可が必要です。
 - **SpeechAnalyzer**：Appleのオンデバイス音声認識です。初期設定はこちらです。
-- **On Device**：Qwen3-ASR 1.7B（8bit）をMLXで動かします。日本語対応、Mac内で認識します。初回は **モデルをダウンロード** で専用環境と約2.2 GBのモデルを取得します。ライブと最終認識それぞれでSpeechAnalyzer / Qwen3-ASRを選べます。
+- **On Device**：Qwen3-ASR 1.7B（8bit）をMLXで動かします。日本語対応、Mac内で認識します。初回は **モデルをダウンロード** で約2.2 GBのモデルを取得・検証します。ライブと最終認識それぞれでSpeechAnalyzer / Qwen3-ASRを選べます。
 
 録音・認識の途中や未処理の結果がある間は切り替えません。結果を貼り付けるか閉じてから保存してください。切り替え時は入力・認識のプロセスを停止し、新しい設定で起動します。
 
 CLIでも同じ設定を使えます。設定ファイルは `~/.config/pebble-index-rust/settings.json` です。
 
 ```sh
+# ソースからCLIを使う場合のみ。build-app.shでは自動実行します
+git submodule update --init -- native/qwen-rs/vendor/mlx-c
+cargo build --release --locked --manifest-path native/qwen-rs/Cargo.toml --target-dir native/qwen-rs/target
 cargo run --release -- setup-qwen
 cargo run --release -- settings --input microphone --speech on-device
 cargo run --release -- gui
@@ -122,7 +125,7 @@ cargo run --release -- microphone
 cargo run --release -- settings --input index --speech apple
 ```
 
-On Deviceは1秒ごとに途中結果を更新し、最大30秒の音声窓と修正可能なテキスト末尾を使います。計算済みのエンコーダー出力・デコーダーKVを再利用し、窓の切り替えは可能なら無音位置で行います。1秒は更新用の音声量であり、BLE・計算・表示を含む総遅延ではありません。録音終了後は別プロセスで全音声をオフライン認識し直します。長い音声はライブラリが分割して全区間を結合し、トークン上限による途中打ち切りは成功として表示しません。
+On Deviceは1秒ごとに途中結果を更新し、最大30秒の音声窓と修正可能なテキスト末尾を使います。計算済みのエンコーダー出力・デコーダーKVを再利用し、窓の切り替えは可能なら無音位置で行います。1秒は更新用の音声量であり、BLE・計算・表示を含む総遅延ではありません。録音終了後は別プロセスで全音声をオフライン認識し直します。長い音声は最大30秒の区間へ分割して全区間を結合し、トークン上限による途中打ち切りは成功として表示しません。
 
 - リングを長押しすると、現在のSpaceの画面下中央に小さなパネルを表示し、文字起こしを更新します。通常ウィンドウ・最大化・別アプリのフルスクリーン上でも表示するmacOSの非アクティブ化パネルを使います。
 - ボタンを離すとライブ表示を止め、残りの音声の受信、録音全体の認識処理を順に待ちます。物理ボタンの変化から表示までにはBLE広告・状態取得の遅延があります。
@@ -252,7 +255,7 @@ INDEX_VOICE_INPUT_COMMAND=/absolute/path/to/input-adapter cargo run --release --
 
 ### 認識モデルを追加する
 
-Rust内で`SpeechEngine`を実装してファクトリーに登録するか、外部プロセスアダプターを指定します。SpeechAnalyzer、Qwen3-ASR MLX、従来CLI用Whisperのアダプターを実装済みです。Qwenは`native/qwen/adapter.py`、セットアップは`src/qwen_setup.rs`に分離しています。
+Rust内で`SpeechEngine`を実装してファクトリーに登録するか、外部プロセスアダプターを指定します。SpeechAnalyzer、Qwen3-ASR MLX、従来CLI用Whisperのアダプターを実装済みです。Qwenは`native/qwen-rs/`の常駐Rustバイナリ、モデルのセットアップは`src/qwen_setup.rs`、モデル・実行ファイルの準備判定は`src/qwen_runtime.rs`に分離しています。
 
 ```sh
 INDEX_VOICE_SPEECH_COMMAND=/absolute/path/to/speech-adapter cargo run --release -- gui
@@ -339,13 +342,13 @@ Macの実際のBLE探索でリングを検出し、30秒探索がIPCの待機期
 ### On Device（Qwen3-ASR MLX）の実行環境
 
 - モデル: [moona3k/mlx-qwen3-asr-1.7b-8bit](https://huggingface.co/moona3k/mlx-qwen3-asr-1.7b-8bit)（8bit、約2.2 GB）。日本語は`Japanese`を明示して認識します。
-- 実装: [mlx-qwen3-asr](https://github.com/moona3k/mlx-qwen3-asr) **0.4.4**（Apache-2.0）。逐次PCM入力には`Session.init_streaming / feed_audio / finish_streaming`を使用します。
-- 直接依存はMLX 0.31.2、NumPy 2.4.6、mlx-qwen3-asr 0.4.4。後者の依存としてregexとhuggingface-hub等を導入し、全て`uv.lock`で固定します。PyTorch・Transformers・音声デバイス・サーバー・話者分離の追加パッケージは導入しません。
-- 保存先: `~/Library/Application Support/Index Voice/qwen-mlx/`。専用`.venv`と`model/`を配置します。旧`desktop/python`には依存しません。
-- `.app`にアダプター・依存定義を埋め込み、`setup-qwen`で展開します。実行時にリポジトリのソースは不要です。
+- 実装: `native/qwen-rs/` のRust＋MLX C API。mlx-cとMLXのrevisionを固定しています。MLX C++とAppleのMetal等を使用し、Python・uv・PyTorchは実行依存に含めません。[出典とライセンス](native/qwen-rs/NOTICE)。
+- 保存先: `~/Library/Application Support/Index Voice/qwen-mlx/model/`。既存の検証済み重みを再利用します。旧`.venv`は参照せず、削除もしません。
+- `.app`には`QwenNative`、`mlx.metallib`、ライセンスを同梱します。実行時にリポジトリやコンパイラーは不要です。開発時は`INDEX_VOICE_QWEN_BINARY`で隣に`mlx.metallib`がある実行ファイルを指定できます。
+- 初回移行時も`setup-qwen`を実行してください。既存ファイルのSHA-256を確認し、`native-model.json`を原子的に更新します。準備判定ではモデルのrevision、各ファイルのサイズ・更新時刻、ネイティブ実行ファイルとMetalリソースを確認します。
 - `setup-qwen`は排他ロック付きで再実行可能。モデルのリビジョンを固定し、重み・設定・トークナイザーのSHA-256を確認します。ダウンロードはcurl、認識は完全ローカルです。
 - 過去の`parakeet_mlx` / `nemotron_mlx`設定もOn Deviceへ読み替えます。旧モデルの保存済みファイルは削除しませんが、現在の認識では使いません。
-- 受信・ACKと推論を分離し、キャンセル前の結果は世代番号で破棄します。録音ごとにストリーミング状態とリサンプラーを作り直します。
+- 受信・ACKと推論を分離し、キャンセル前の結果は録音ID・世代番号で破棄します。受領済みPCMと認識に反映済みのPCMを別々に数え、最終結果が全入力を覆うことを確認します。録音ごとにストリーミング状態とリサンプラーを作り直します。
 - ライブ認識では冒頭の無音を保留し、発話の200 ms前からモデルへ渡します。発話開始後の間や語尾は削りません。非常に小さい声は開始判定が遅れる場合があります。
 - BLE転送中の状態照会の重複と、転送直後の固定待ちを除去しています。録音終了後の回収中は状態照会を1秒間隔に抑えます。音声の生成速度がBLEの実効転送速度を上回る場合、リング側に転送待ちが残るため、認識エンジンだけでは遅延を解消できません。
 - 選定理由・日本語精度とストリーミング方式の比較は[ASRモデル比較](docs/asr-model-selection.md)を参照してください。

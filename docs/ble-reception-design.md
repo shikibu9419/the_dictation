@@ -4,7 +4,7 @@
 
 本書を受入条件として実装を進めている。依頼に合わせ、Qwenの実装・評価から着手し、その後BLE受信と状態管理を変更する。プロトコルと既存ログの根拠は [解析根拠](ble-protocol-findings.md) を参照。
 
-現時点ではQwenのRust＋MLX推論コア、8bit重み、prefix再利用、数値・実モデルテストまで実装し、[比較結果](qwen-native-evaluation.md) を記録した。有限窓のlive制御、全文区間処理、常駐workerも実装・評価した。親の認識スケジューラー、アプリへの切替、および以下のBLE再設計は未完了。アプリの再起動・ウィンドウ表示テストは行っていない。
+現時点ではQwenのRust＋MLX推論コア、8bit重み、prefix再利用、数値・実モデルテストまで実装し、[比較結果](qwen-native-evaluation.md) を記録した。有限窓のlive制御、全文区間処理、常駐workerも実装・評価した。アプリの呼び出し・モデル検証・同梱をネイティブへ切り替えた。親の認識スケジューラーと以下のBLE再設計は未完了。アプリの再起動・ウィンドウ表示テストは行っていない。
 
 ## 1. 基本動作
 
@@ -268,10 +268,10 @@ P=50msは待機中だけで最大20回/秒・72,000回/時のS要求になる評
 
 ### 現在の呼び出し
 
-現在はRust → 専用Pythonプロセス → `mlx-qwen3-asr 0.4.4` → MLX/Metal。Pythonは起動用ラッパーだけでなく、音声前処理・モデル構築・逐次認識の制御も実行している。
+移行前はRust → 専用Pythonプロセス → `mlx-qwen3-asr 0.4.4` → MLX/Metal。Pythonは起動用ラッパーだけでなく、音声前処理・モデル構築・逐次認識の制御も実行している。
 
-- [process.rs](../src/adapters/speech/process.rs) が `.venv/bin/python -u -c ...` で [adapter.py](../native/qwen/adapter.py) を起動する。
-- [qwen_setup.rs](../src/qwen_setup.rs) がuv環境を作り、Pythonでモデルを取得する。[settings.rs](../src/settings.rs) の準備判定もPython実行ファイルを要求する。
+- 移行前の `process.rs` は `.venv/bin/python -u -c ...` で埋込Python adapterを起動していた。現在は `QwenNative` を起動する。
+- 移行前のセットアップと準備判定はuv/Pythonに依存していた。現在の [qwen_setup.rs](../src/qwen_setup.rs) は固定モデルを取得・SHA-256検証し、[qwen_runtime.rs](../src/qwen_runtime.rs) は対応manifestと実行ファイル・Metalリソースを確認する。
 - 採用モデルは `moona3k/mlx-qwen3-asr-1.7b-8bit`、revision `22c8abe6a6772122dda5905967d7496d1d3e8dd2`。
 - 現在のliveは1秒チャンク、最大30秒窓、prefix再利用と無音付近での確定を使用。入力200ms化と推論窓1秒化は別の設定として扱う。
 

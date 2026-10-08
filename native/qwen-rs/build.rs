@@ -45,6 +45,11 @@ fn build_mlx() {
 
     // Link paths
     let lib_dir = dst.join("lib");
+    // Cargo's OUT_DIR is <profile>/build/<crate-hash>/out. MLX resolves its
+    // Metal resource next to the executable after distribution.
+    let profile = dst.ancestors().nth(3).expect("Cargo profile directory");
+    std::fs::copy(lib_dir.join("mlx.metallib"), profile.join("mlx.metallib"))
+        .expect("Copy MLX Metal runtime next to QwenNative");
     println!("cargo:rustc-link-search=native={}", lib_dir.display());
 
     // Also check lib64 (some CMake configs use this)

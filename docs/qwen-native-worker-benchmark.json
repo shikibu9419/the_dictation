@@ -1,0 +1,23 @@
+{
+  "model_revision": "22c8abe6a6772122dda5905967d7496d1d3e8dd2",
+  "input": "Kyoko long.wav repeated twice, PCM16 mono 16000 Hz",
+  "packet_samples": 3200,
+  "inference_interval_seconds": 1,
+  "max_window_seconds": 30,
+  "metrics": {
+    "audio_seconds": 75.712375,
+    "early_median_lag": 0.4,
+    "elapsed": 77.306056,
+    "first_partial_seconds": 1.201803833,
+    "late_median_lag": 0.4,
+    "peak_lag_seconds": 2.2,
+    "peak_memory_bytes": 2609368216,
+    "text": "最初の確認です。今日は指輪から届いた音声を日本語の文章に変換する仕組みについて説明します。ボタンを押すと音声の収集が始まり、話している間は文字が少しずつ表示されます。ボタンを離した後も届くのが遅れた音声を最後まで受け取ります。短い休憩を挟んだ場合でも文章の途中が消えてしまわないようにします。次の録音を始めた時には前の会話の内容を引き継がず新しい文章として処理します。これで最後の確認を終わります。最初の確認です。今日は指輪から届いた音声を日本語の文章に変換する仕組みについて説明します。ボタンを押すと音声の収集が始まり、話している間は文字が少しずつ表示されます。ボタンを話した後も。届くのが遅れた音声を最後まで受け取ります。短い休憩を挟んだ場合でも、文章の途中が消えてしまわないようにします。次の録音を始めたときには、前の会話の内容を引き継がず、新しい文章として処理します。これで最後の確認を終わります。"
+  },
+  "limitations": [
+    "Synthetic Japanese audio only",
+    "Lag is accepted source PCM minus consumed PCM; excludes BLE and UI",
+    "Peak memory is the MLX allocator measure, not process RSS",
+    "Parent live/batch contention is not included"
+  ]
+}
