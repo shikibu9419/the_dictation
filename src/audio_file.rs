@@ -43,6 +43,10 @@ impl FileRecognizer {
     ) -> Result<Value> {
         let (pcm, rate) = if let Some(rate) = raw_rate {
             ensure!((1000..=192000).contains(&rate), "Invalid audio sample rate");
+            ensure!(
+                std::fs::metadata(path)?.len() <= 128 * 1024 * 1024,
+                "Raw audio exceeds 64 Mi samples"
+            );
             let pcm = std::fs::read(path)?;
             ensure!(
                 !pcm.is_empty() && pcm.len() % 2 == 0,
@@ -72,19 +76,33 @@ impl FileRecognizer {
                 value["rate"].as_u64().context("Missing sample rate")? as u32,
             )
         };
+        ensure!(
+            (1000..=192000).contains(&rate) && !pcm.is_empty() && pcm.len() % 2 == 0,
+            "Expected nonempty mono s16le PCM with a valid sample rate"
+        );
+        ensure!(
+            pcm.len() <= 128 * 1024 * 1024,
+            "Decoded audio exceeds 64 Mi samples"
+        );
         if let Some(path) = wav {
             write_wav(path, &pcm, rate)?;
         }
         self.next += 1;
         let key = format!("file-{}", self.next);
         self.client
-            .send(json!({"type":"recording","key":key,"pcm":STANDARD.encode(pcm),"rate":rate}))?;
+            .send(json!({"type":"state","collecting":false}))?;
+        // Keep file input within the same bounded JSONL protocol as live capture.
+        let chunks = pcm.len().div_ceil(1024 * 1024);
+        for (index, chunk) in pcm.chunks(1024 * 1024).enumerate() {
+            self.client.send(json!({"type":"audio","key":key,"pcm":STANDARD.encode(chunk),"rate":rate,"final":index + 1 == chunks}))?;
+            tokio::task::yield_now().await;
+        }
         loop {
             let event = self
                 .client
                 .events
                 .recv()
-                .await
+                .await?
                 .context("Recognition worker closed")??;
             if event["type"] == "error" {
                 bail!("Speech recognition: {}", event["text"]);

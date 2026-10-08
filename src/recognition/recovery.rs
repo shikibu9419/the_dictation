@@ -204,7 +204,7 @@ pub(super) async fn start_engine(
 impl Speech {
     pub(super) async fn work(
         mut self,
-        mut jobs: mpsc::UnboundedReceiver<Job>,
+        mut jobs: ipc::Receiver<Job>,
         input: Arc<Mutex<Box<dyn InputAdapter>>>,
     ) -> Result<()> {
         let mut restart = self.recovery.requests.clone();
@@ -364,7 +364,7 @@ impl Speech {
 
     async fn run(
         &mut self,
-        jobs: &mut mpsc::UnboundedReceiver<Job>,
+        jobs: &mut ipc::Receiver<Job>,
         input: &Arc<Mutex<Box<dyn InputAdapter>>>,
     ) -> Result<()> {
         if self.recovery.refresh_priority {
@@ -404,7 +404,7 @@ impl Speech {
                 tokio::select! {
                     biased;
                     job = jobs.recv() => {
-                        let Some(job) = job else { self.engine.close().await?; return Ok(()) };
+                        let Some(job) = job? else { self.engine.close().await?; return Ok(()) };
                         self.recovery.pending = Some(job);
                     }
                     event = self.engine.event() => { self.event(event.context(EngineFault)?)?; continue; }
@@ -640,8 +640,8 @@ mod tests {
             final_part,
             checkpoint: None,
         };
-        let (ltx, lrx) = mpsc::unbounded_channel();
-        let (btx, brx) = mpsc::unbounded_channel();
+        let (ltx, lrx) = ipc::process_channel("speech jobs");
+        let (btx, brx) = ipc::process_channel("speech jobs");
         let mut tasks = JoinSet::new();
         tasks.spawn(live.work(lrx, input.clone()));
         tasks.spawn(batch.work(brx, input));

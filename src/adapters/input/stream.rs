@@ -3,10 +3,11 @@ use crate::{
     recognition::{Client, Options, display_event},
 };
 use anyhow::{Context, Result, ensure};
+use pebble_index::ipc::{self, Lines};
 use serde_json::Value;
 use std::{path::PathBuf, process::Stdio};
 use tokio::{
-    io::{AsyncBufRead, AsyncBufReadExt, BufReader},
+    io::{AsyncBufRead, BufReader},
     process::Command,
 };
 
@@ -36,15 +37,18 @@ async fn run_source(
         .kill_on_drop(true)
         .spawn()
         .context("Start input adapter")?;
-    let mut diagnostics = BufReader::new(source.stderr.take().context("Input adapter stderr")?);
+    let mut diagnostics = Lines::log_chunks(
+        BufReader::new(source.stderr.take().context("Input adapter stderr")?),
+        ipc::MAX_LOG_LINE_BYTES,
+    );
     let logs = output.clone();
     let logger = tokio::spawn(async move {
-        let mut bytes = Vec::new();
         loop {
-            bytes.clear();
-            match diagnostics.read_until(b'\n', &mut bytes).await {
-                Ok(0) => break,
-                Ok(_) => logs.error(String::from_utf8_lossy(&bytes).trim_end_matches(['\r', '\n'])),
+            match diagnostics.next_bytes().await {
+                Ok(None) => break,
+                Ok(Some(bytes)) => {
+                    logs.error(String::from_utf8_lossy(&bytes).trim_end_matches(['\r', '\n']))
+                }
                 Err(error) => {
                     logs.error(format!("Input adapter log: {error}"));
                     break;
@@ -82,7 +86,7 @@ async fn receive(
     if !await_ready {
         output.event(&serde_json::json!({"type":"ready"}));
     }
-    let mut lines = reader.lines();
+    let mut lines = Lines::new(reader, ipc::MAX_LINE_BYTES);
     loop {
         tokio::select! {
             line = lines.next_line() => {
@@ -96,7 +100,7 @@ async fn receive(
                 if message["type"] == "state" { output.event(&message); }
                 client.send(message)?;
             }
-            event = client.events.recv() => display_event(event.context("Recognition worker closed")??, &output)?,
+            event = client.events.recv() => display_event(event?.context("Recognition worker closed")??, &output)?,
         }
     }
     client.flush(&output).await

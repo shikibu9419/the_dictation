@@ -23,6 +23,23 @@ impl Pcm {
     pub fn is_empty(&self) -> bool {
         self.len == 0
     }
+    pub fn block_count(&self) -> usize {
+        self.blocks.len()
+    }
+    /// A view pins whole allocations, even if it exposes only one sample.
+    /// Repeated shared allocations are charged conservatively per reference.
+    pub fn retained_bytes(&self) -> usize {
+        self.blocks.iter().fold(
+            self.blocks
+                .capacity()
+                .saturating_mul(std::mem::size_of::<Block>()),
+            |bytes, block| {
+                bytes
+                    .saturating_add(block.samples.capacity().saturating_mul(2))
+                    .saturating_add(64)
+            },
+        )
+    }
     pub fn append(&mut self, other: &Self) {
         self.blocks.extend(other.blocks.iter().map(|block| Block {
             samples: block.samples.clone(),
@@ -95,6 +112,15 @@ impl FromIterator<i16> for Pcm {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn a_tiny_cursor_view_accounts_for_the_entire_pinned_allocation() {
+        let input: Pcm = vec![7; 4096].into();
+        let view = input.range(100..101);
+        assert_eq!(view.len(), 1);
+        assert_eq!(view.block_count(), 1);
+        assert!(view.retained_bytes() >= 8192);
+        assert_eq!(Pcm::default().retained_bytes(), 0);
+    }
     #[test]
     fn full_recording_and_cursor_share_all_sample_allocations() {
         let first = Pcm::from(vec![1, 2, 3]);

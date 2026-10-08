@@ -10,6 +10,7 @@ use crate::{
     output::Output,
 };
 use anyhow::{Context, Result, bail, ensure};
+use pebble_index::ipc::{self, Lines, Weight};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{
@@ -17,12 +18,7 @@ use std::{
     sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
-use tokio::{
-    io::{AsyncBufReadExt, BufReader},
-    process::Command,
-    sync::{mpsc, oneshot},
-    task::JoinSet,
-};
+use tokio::{io::BufReader, process::Command, sync::oneshot, task::JoinSet};
 mod recovery;
 use recovery::{EngineFault, Recovery, start_engine};
 
@@ -90,6 +86,21 @@ enum Job {
     Release(String),
     Flush(oneshot::Sender<()>),
     Checkpoint(Value),
+}
+impl Weight for Job {
+    fn queued_bytes(&self) -> usize {
+        let payload = match self {
+            Job::Audio(part, _) | Job::ReceptionAudio(part, _, _) => part
+                .samples
+                .retained_bytes()
+                .saturating_add(part.key.capacity())
+                .saturating_add(part.checkpoint.as_ref().map_or(0, Weight::queued_bytes)),
+            Job::Reset(key, _) | Job::Release(key) => key.capacity(),
+            Job::Checkpoint(value) => value.queued_bytes(),
+            Job::Flush(_) => 0,
+        };
+        std::mem::size_of::<Self>().saturating_add(payload)
+    }
 }
 struct Speech {
     engine: Box<dyn SpeechEngine>,
@@ -343,8 +354,8 @@ impl Speech {
 }
 
 struct Recognition {
-    live: Option<mpsc::UnboundedSender<Job>>,
-    batch: mpsc::UnboundedSender<Job>,
+    live: Option<ipc::Sender<Job>>,
+    batch: ipc::Sender<Job>,
     lifecycle: Arc<Mutex<Lifecycle>>,
     audio: HashMap<String, (crate::pcm::Pcm, u32)>,
     output: Output,
@@ -527,6 +538,24 @@ impl Recognition {
     }
     fn add(&mut self, part: Part) -> Result<()> {
         let key = part.key.clone();
+        let held_samples: usize = self.audio.values().map(|(pcm, _)| pcm.len()).sum();
+        let held_blocks: usize = self.audio.values().map(|(pcm, _)| pcm.block_count()).sum();
+        ensure!(
+            part.samples.len() <= (64 * 1024 * 1024usize).saturating_sub(held_samples),
+            "PCM input capacity exceeded: held_samples={held_samples} incoming_samples={} limit=67108864",
+            part.samples.len()
+        );
+        ensure!(
+            part.samples.block_count() <= 16384usize.saturating_sub(held_blocks),
+            "PCM input block capacity exceeded: held_blocks={held_blocks} limit=16384"
+        );
+        ensure!(
+            self.audio.contains_key(&key) || self.audio.len() < 128,
+            "PCM input recording capacity exceeded: limit=128"
+        );
+        if let Some((_, rate)) = self.audio.get(&key) {
+            ensure!(*rate == part.rate, "Sample rate changed within recording");
+        }
         if self.live.is_none()
             && !part.final_part
             && !part.samples.is_empty()
@@ -586,7 +615,7 @@ impl Recognition {
         Ok(())
     }
     async fn input(mut self, input: Arc<Mutex<Box<dyn InputAdapter>>>) -> Result<()> {
-        let mut lines = BufReader::new(tokio::io::stdin()).lines();
+        let mut lines = Lines::new(BufReader::new(tokio::io::stdin()), ipc::MAX_LINE_BYTES);
         let mut clock = tokio::time::interval(Duration::from_millis(5));
         clock.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
@@ -696,8 +725,8 @@ pub async fn worker(options: Options) -> Result<()> {
     {
         live.priority = Some(LivePriority::new(live.recovery.control(), batch_control).await?);
     }
-    let (ltx, lrx) = mpsc::unbounded_channel();
-    let (btx, brx) = mpsc::unbounded_channel();
+    let (ltx, lrx) = ipc::process_channel("live recognition jobs");
+    let (btx, brx) = ipc::process_channel("batch recognition jobs");
     let recognition = Recognition {
         live: live.as_ref().map(|_| ltx),
         batch: btx,
@@ -723,8 +752,8 @@ pub async fn worker(options: Options) -> Result<()> {
 }
 
 pub struct Client {
-    pub outbound: mpsc::UnboundedSender<Value>,
-    pub events: mpsc::UnboundedReceiver<Result<Value>>,
+    pub outbound: ipc::Sender<Value>,
+    pub events: ipc::Receiver<Result<Value>>,
     task: tokio::task::JoinHandle<()>,
     group: ProcessGroup,
 }
@@ -751,13 +780,13 @@ impl Client {
             group.0,
             std::process::id()
         ));
-        let (outbound, mut rx) = mpsc::unbounded_channel();
-        let (tx, events) = mpsc::unbounded_channel();
+        let (outbound, mut rx) = ipc::process_channel("BLE/source to recognition");
+        let (tx, events) = ipc::process_channel("recognition results");
         let task = tokio::spawn(async move {
             loop {
                 tokio::select! {
                     message=rx.recv()=>{
-                        let Some(message)=message else {break};
+                        let message=match message { Ok(Some(message))=>message, Ok(None)=>break, Err(e)=>{tx.fail(e);break;} };
                         if let Err(e)=helper.send(&message).await {let _=tx.send(Err(e));break;}
                     }
                     event=helper.event()=>{let failed=event.is_err();if tx.send(event).is_err()||failed {break;}}
@@ -783,7 +812,7 @@ impl Client {
             let event = self
                 .events
                 .recv()
-                .await
+                .await?
                 .context("Recognition worker closed")??;
             if event["type"] == "flushed" {
                 return Ok(());
@@ -822,7 +851,7 @@ mod gui_tests {
         use pebble_index::reception::{input_effects::Effect, session_state::Action};
         let (mut r, _, _) = recognition();
         // Keep receivers alive for the queued reset/release commands.
-        let (tx, _rx) = mpsc::unbounded_channel();
+        let (tx, _rx) = ipc::process_channel("recognition");
         r.live = Some(tx);
         {
             let mut life = r.lifecycle.lock().unwrap();
@@ -876,13 +905,9 @@ mod gui_tests {
         assert!(!life.permits("ring-2", Some(1)));
         assert!(!life.visible("ring-2", Some(1)));
     }
-    fn recognition() -> (
-        Recognition,
-        mpsc::UnboundedReceiver<Job>,
-        mpsc::UnboundedReceiver<Job>,
-    ) {
-        let (live, lrx) = mpsc::unbounded_channel();
-        let (batch, brx) = mpsc::unbounded_channel();
+    fn recognition() -> (Recognition, ipc::Receiver<Job>, ipc::Receiver<Job>) {
+        let (live, lrx) = ipc::process_channel("recognition");
+        let (batch, brx) = ipc::process_channel("recognition");
         (
             Recognition {
                 live: Some(live),
@@ -903,6 +928,34 @@ mod gui_tests {
             final_part,
             checkpoint: Some(json!(12)),
         }
+    }
+    #[test]
+    fn generic_pcm_capacity_errors_preserve_the_existing_store() {
+        let (mut r, _live, _batch) = recognition();
+        for n in 0..128 {
+            r.audio.insert(format!("{n}"), (Default::default(), 1000));
+        }
+        assert!(
+            r.add(part("extra", &[1], false))
+                .unwrap_err()
+                .to_string()
+                .contains("recording capacity")
+        );
+        assert_eq!(r.audio.len(), 128);
+        r.audio.clear();
+        let block: crate::pcm::Pcm = vec![1; 1024 * 1024].into();
+        let mut full = crate::pcm::Pcm::default();
+        for _ in 0..64 {
+            full.append(&block);
+        }
+        r.audio.insert("full".into(), (full, 9997));
+        assert!(
+            r.add(part("full", &[2], false))
+                .unwrap_err()
+                .to_string()
+                .contains("held_samples=67108864")
+        );
+        assert_eq!(r.audio["full"].0.len(), 64 * 1024 * 1024);
     }
     #[test]
     fn release_stops_live_but_batch_receives_all_chunks() {

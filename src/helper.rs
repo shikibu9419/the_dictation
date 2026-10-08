@@ -1,12 +1,13 @@
 use crate::output::Output;
 use anyhow::{Context, Result, bail};
+use pebble_index::ipc::{self, Lines};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::{path::PathBuf, process::Stdio, sync::Arc, time::Duration};
 use tokio::{
-    io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
+    io::{AsyncWriteExt, BufReader},
     process::{Child, ChildStdin, Command},
-    sync::{Mutex, mpsc},
+    sync::Mutex,
 };
 
 pub async fn executable(name: &str, source: &str, output: &Output) -> Result<PathBuf> {
@@ -71,7 +72,7 @@ pub async fn executable(name: &str, source: &str, output: &Output) -> Result<Pat
 pub struct Helper {
     pub child: Child,
     stdin: HelperInput,
-    pub events: mpsc::UnboundedReceiver<Result<Value>>,
+    pub events: ipc::Receiver<Result<Value>>,
     readers: Vec<tokio::task::JoinHandle<()>>,
 }
 #[derive(Clone)]
@@ -79,6 +80,11 @@ pub struct HelperInput(Arc<Mutex<Option<ChildStdin>>>);
 impl HelperInput {
     pub async fn send(&self, message: &Value) -> Result<()> {
         let mut bytes = serde_json::to_vec(message)?;
+        anyhow::ensure!(
+            bytes.len() <= ipc::MAX_LINE_BYTES,
+            "Helper input exceeds {} bytes",
+            ipc::MAX_LINE_BYTES
+        );
         bytes.push(b'\n');
         let mut handle = self.0.lock().await;
         let stdin = handle.as_mut().context("Helper input closed")?;
@@ -105,9 +111,15 @@ impl Helper {
             .kill_on_drop(true)
             .spawn()?;
         let stdin = child.stdin.take().unwrap();
-        let mut stdout = BufReader::new(child.stdout.take().unwrap()).lines();
-        let mut stderr = BufReader::new(child.stderr.take().unwrap());
-        let (tx, events) = mpsc::unbounded_channel();
+        let mut stdout = Lines::new(
+            BufReader::new(child.stdout.take().unwrap()),
+            ipc::MAX_LINE_BYTES,
+        );
+        let mut stderr = Lines::log_chunks(
+            BufReader::new(child.stderr.take().unwrap()),
+            ipc::MAX_LOG_LINE_BYTES,
+        );
+        let (tx, events) = ipc::process_channel("helper results");
         let logs = tx.clone();
         let readers = vec![
             tokio::spawn(async move {
@@ -117,24 +129,28 @@ impl Helper {
                             serde_json::from_str(&line).context("Invalid helper JSON")
                         }
                         Ok(None) => Err(anyhow::anyhow!("Helper output closed")),
-                        Err(e) => Err(e.into()),
+                        Err(e) => Err(e),
                     };
                     let failed = event.is_err();
                     if let Some(observer) = &observer {
                         observer(&event);
                     }
-                    if tx.send(event).is_err() || failed {
+                    if let Err(error) = tx.send(event) {
+                        if let Some(observer) = &observer {
+                            observer(&Err(error));
+                        }
+                        break;
+                    }
+                    if failed {
                         break;
                     }
                 }
             }),
             tokio::spawn(async move {
-                let mut bytes = Vec::new();
                 loop {
-                    bytes.clear();
-                    match stderr.read_until(b'\n', &mut bytes).await {
-                        Ok(0) => break,
-                        Ok(_) => {
+                    match stderr.next_bytes().await {
+                        Ok(None) => break,
+                        Ok(Some(bytes)) => {
                             // Native engines may log token fragments that are not complete UTF-8.
                             let line = String::from_utf8_lossy(&bytes);
                             let line = line.trim_end_matches(['\r', '\n']);
@@ -145,7 +161,7 @@ impl Helper {
                             }
                         }
                         Err(e) => {
-                            let _ = logs.send(Err(e.into()));
+                            logs.fail(e);
                             break;
                         }
                     }
@@ -166,7 +182,7 @@ impl Helper {
         self.stdin.clone()
     }
     pub async fn event(&mut self) -> Result<Value> {
-        self.events.recv().await.context("Helper closed")?
+        self.events.recv().await?.context("Helper closed")?
     }
     pub async fn close(&mut self) {
         // Closing the handle delivers EOF; shutdown() alone leaves the pipe open on macOS.
@@ -199,6 +215,50 @@ impl Drop for ProcessGroup {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test]
+    async fn control_observer_keeps_running_with_a_stalled_consumer_and_sees_overflow() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let acknowledged = Arc::new(AtomicBool::new(false));
+        let observed = acknowledged.clone();
+        let (failed, failure) = tokio::sync::oneshot::channel();
+        let failed = std::sync::Mutex::new(Some(failed));
+        let observer: Observer = Box::new(move |event| {
+            if event.as_ref().is_ok_and(|v| v["type"] == "execution_state") {
+                observed.store(true, Ordering::SeqCst);
+            }
+            if let Err(error) = event
+                && let Some(failed) = failed.lock().unwrap().take()
+            {
+                let _ = failed.send(error.to_string());
+            }
+        });
+        let mut command = Command::new("/bin/sh");
+        command.args(["-c", r#"i=0; while [ "$i" -lt 4096 ]; do printf '{"type":"partial","text":"text"}\n'; i=$((i + 1)); done; printf '{"type":"execution_state","permitted":false}\n'; read line"#]);
+        let mut helper = Helper::spawn_observed(
+            command,
+            Output::new(false, None).unwrap(),
+            "test".into(),
+            Some(observer),
+        )
+        .await
+        .unwrap();
+        // Deliberately do not consume helper.event() until the queue fills.
+        let error = tokio::time::timeout(Duration::from_secs(5), failure)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(acknowledged.load(Ordering::SeqCst));
+        assert!(error.contains("queue capacity exceeded"), "{error}");
+        assert!(
+            helper
+                .event()
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("queue capacity exceeded")
+        );
+        helper.close().await;
+    }
     #[tokio::test]
     async fn close_delivers_eof_before_waiting_and_is_idempotent() {
         let mut command = Command::new("/bin/sh");

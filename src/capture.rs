@@ -7,6 +7,7 @@ use crate::{
 };
 use anyhow::{Context, Result};
 use base64::{Engine, engine::general_purpose::STANDARD};
+use pebble_index::ipc;
 use pebble_index::reception::connection::{ConnectionPolicy, WatchReason};
 use pebble_index::reception::scheduler::{Decision, Request, Scheduler};
 use serde_json::{Value, json};
@@ -14,13 +15,12 @@ use std::{
     collections::HashMap,
     time::{Duration, Instant},
 };
-use tokio::sync::mpsc;
 
 struct Received {
     next: Option<u16>,
     initialized: bool,
     initial_count: Option<u8>,
-    outbound: Option<mpsc::UnboundedSender<Value>>,
+    outbound: Option<ipc::Sender<Value>>,
     output: Output,
     collecting: Option<bool>,
     range_end: Option<u16>,
@@ -279,7 +279,7 @@ async fn receive(
     args: Listen,
     address: String,
     fetch: bool,
-    outbound: Option<mpsc::UnboundedSender<Value>>,
+    outbound: Option<ipc::Sender<Value>>,
     output: Output,
 ) -> Result<()> {
     let interval = args.interval.unwrap_or(
@@ -445,7 +445,7 @@ pub async fn run(args: Listen, fetch: bool, output: Output) -> Result<()> {
         if let Some(speech) = &mut speech {
             tokio::select! {
                 result=&mut receiving=>{result?;speech.flush(&output).await?;return Ok(());}
-                event=speech.events.recv()=>{display_event(event.context("Recognition worker closed")??,&output)?;}
+                event=speech.events.recv()=>{display_event(event?.context("Recognition worker closed")??,&output)?;}
             }
         } else {
             return receiving.await;
@@ -458,7 +458,7 @@ mod gui_tests {
     use super::*;
     #[tokio::test]
     async fn ready_read_wins_before_clock_and_pending_read_emits_ordered_ticks() {
-        let (tx, mut rx) = mpsc::unbounded_channel();
+        let (tx, mut rx) = ipc::process_channel("capture events");
         let mut received = Received {
             next: None,
             initialized: true,
@@ -505,7 +505,7 @@ mod gui_tests {
         let log = temp.path().join("events.log");
         let mut output = Output::new(false, Some(&log)).unwrap();
         output.events = true;
-        let (tx, mut rx) = mpsc::unbounded_channel();
+        let (tx, mut rx) = ipc::process_channel("capture events");
         let mut received = Received {
             next: None,
             initialized: false,

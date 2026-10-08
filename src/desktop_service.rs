@@ -3,17 +3,15 @@ use crate::{
     output::Output,
 };
 use anyhow::{Context, Result};
+use pebble_index::ipc::{self, Lines};
 use serde_json::{Value, json};
-use tokio::{
-    io::{AsyncBufReadExt, BufReader},
-    process::Command,
-};
+use tokio::{io::BufReader, process::Command};
 
 /// UI commands run independently of BLE reception and recognition workers.
 pub async fn run(output: Output) -> Result<()> {
     let exe = executable("Paste", include_str!("../native/Paste.swift"), &output).await?;
     let mut helper = Helper::spawn(Command::new(exe), output.clone(), "paste".into()).await?;
-    let mut lines = BufReader::new(tokio::io::stdin()).lines();
+    let mut lines = Lines::new(BufReader::new(tokio::io::stdin()), ipc::MAX_LINE_BYTES);
     loop {
         tokio::select! {
             line = lines.next_line() => {
