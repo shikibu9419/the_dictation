@@ -1,5 +1,6 @@
 import Foundation
 import CoreBluetooth
+import AppKit
 
 let serviceID = CBUUID(string: "607b5c9b-3700-4e94-f44a-2df900bcb0c3")
 let bridgeQueue = DispatchQueue(label: "pebble-index.bluetooth")
@@ -7,9 +8,49 @@ let outputLock = NSLock()
 func bluetoothError(_ error: Error) -> String {
     let native = error as NSError
     if native.domain == CBErrorDomain && native.code == CBError.peerRemovedPairingInformation.rawValue {
-        return "Peer removed pairing information"
+        return "Peer removed pairing information (\(native.domain) code=\(native.code))"
     }
-    return error.localizedDescription
+    return "\(error.localizedDescription) (\(native.domain) code=\(native.code))"
+}
+
+// Pure advertisement filter; no CoreBluetooth or UI calls. A continuously
+// repeated advertisement is not a fresh user action or a reason to reconnect.
+struct AdvertisementGate {
+    var baseline: String?
+    var lastSeen: TimeInterval
+    var lastAttempt: TimeInterval
+    var retryInterval: TimeInterval
+    var pendingReason: String?
+
+    init(baseline: String?, now: TimeInterval, retryInterval: TimeInterval) {
+        self.baseline = baseline
+        self.lastSeen = now
+        self.lastAttempt = now
+        self.retryInterval = retryInterval
+    }
+    mutating func observe(_ signature: String?, now: TimeInterval) -> String? {
+        if now - lastSeen >= 2 { pendingReason = "advertisement_reappeared" }
+        lastSeen = now
+        if let signature, signature != baseline {
+            pendingReason = baseline == nil ? "first_advertisement" : "advertisement_changed"
+        }
+        if pendingReason == nil && retryInterval > 0 && now - lastAttempt >= retryInterval {
+            pendingReason = "recovery_probe"
+        }
+        return pendingReason
+    }
+    mutating func accepted(_ signature: String?, now: TimeInterval) {
+        baseline = signature
+        lastAttempt = now
+        pendingReason = nil
+    }
+}
+
+func activitySignature(_ manufacturer: Data?) -> String? {
+    guard let data = manufacturer, data.count == 8 else { return nil }
+    let b = [UInt8](data.dropFirst(2))
+    let fingerprint = UInt32(b[0]) | UInt32(b[1]) << 8 | UInt32(b[2]) << 16 | UInt32(b[3]) << 24
+    return String(format: "%08x:%u:%u:%u", fingerprint, b[4], b[5] & 32 == 0 ? 0 : 1, b[5] & 128 == 0 ? 0 : 1)
 }
 func normalizedUUID(_ uuid: CBUUID) -> String {
     let value = uuid.uuidString.lowercased()
@@ -40,9 +81,28 @@ final class Bluetooth: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate 
     var timer: DispatchSourceTimer?
     var serviceCount = 0
     var ready = false
+    var unavailable = false
+    var watchAddress: String?
+    var advertisementGate: AdvertisementGate?
+    var workspaceObservers: [NSObjectProtocol] = []
+    var resumeRequested: String?
     override init() {
         super.init()
         central = CBCentralManager(delegate: self, queue: bridgeQueue)
+        for name in [NSWorkspace.didWakeNotification, NSWorkspace.sessionDidBecomeActiveNotification] {
+            workspaceObservers.append(NSWorkspace.shared.notificationCenter.addObserver(forName: name, object: nil, queue: nil) { [weak self] _ in
+                bridgeQueue.async { self?.resumeHint("mac_resumed") }
+            })
+        }
+    }
+    func resumeHint(_ reason: String) {
+        if current?.state != .connected { resumeRequested = reason }
+        guard operation == "find", pending?["watch"] as? Bool == true,
+              let address = pending?["address"] as? String else { return }
+        resumeRequested = nil
+        central.stopScan()
+        advertisementGate = nil
+        reply(["address": address, "reconnect_reason": reason])
     }
     func reply(_ value: Any = NSNull(), error: String? = nil) {
         guard let request = pending else { return }
@@ -55,8 +115,13 @@ final class Bluetooth: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate 
     func centralManagerDidUpdateState(_ central: CBCentralManager) {
         if central.state == .poweredOn {
             if !ready { ready = true; emit(["type": "ready"]) }
+            else if unavailable { resumeHint("bluetooth_resumed") }
+            unavailable = false
         } else if central.state != .unknown && central.state != .resetting {
-            emit(["type": "error", "text": "Bluetooth is unavailable (state \(central.state.rawValue)). Check Bluetooth power and permission."])
+            unavailable = true
+            let error = "Bluetooth is unavailable (state \(central.state.rawValue)). Check Bluetooth power and permission."
+            if pending != nil { reply(error: error) }
+            else { emit(["type": "error", "text": error]) }
         }
     }
     func description(_ peripheral: CBPeripheral) -> [String: Any] {
@@ -78,7 +143,9 @@ final class Bluetooth: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate 
         expiry.setEventHandler { [weak self] in
             guard let self, self.pending?["id"] as? Int == id else { return }
             if self.operation == "scan" || self.operation == "find" {
-                self.central.stopScan()
+                // Keep observing between watch replies; restarting discovery
+                // on every timeout would create artificial advertisement gaps.
+                if self.pending?["watch"] as? Bool != true { self.central.stopScan() }
                 if self.operation == "scan" { self.reply(self.advertisements.keys.compactMap { self.devices[$0].map(self.description) }) }
                 else { self.reply() }
             } else {
@@ -95,9 +162,34 @@ final class Bluetooth: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate 
                 devices[uuid] = peripheral; reply(description(peripheral))
             } else { reply() }
         case "scan", "find":
-            advertisements.removeAll()
-            central.scanForPeripherals(withServices: [serviceID], options: [CBCentralManagerScanOptionAllowDuplicatesKey: true])
+            if request["watch"] as? Bool == true {
+                if let reason = resumeRequested, let address = request["address"] as? String,
+                   central.state == .poweredOn {
+                    resumeRequested = nil
+                    reply(["address": address, "reconnect_reason": reason])
+                    return
+                }
+                let address = (request["address"] as? String)?.lowercased()
+                if advertisementGate == nil || watchAddress != address || !central.isScanning {
+                    advertisementGate = AdvertisementGate(baseline: request["baseline"] as? String,
+                        now: ProcessInfo.processInfo.systemUptime,
+                        retryInterval: (request["retry_interval_ms"] as? Double ?? 0) / 1000)
+                }
+                advertisementGate?.retryInterval = (request["retry_interval_ms"] as? Double ?? 0) / 1000
+                watchAddress = address
+            } else {
+                advertisementGate = nil
+                watchAddress = nil
+                advertisements.removeAll()
+            }
+            if !central.isScanning && central.state == .poweredOn {
+                central.scanForPeripherals(withServices: [serviceID], options: [CBCentralManagerScanOptionAllowDuplicatesKey: true])
+            }
         case "connect":
+            central.stopScan()
+            resumeRequested = nil
+            advertisementGate = nil
+            watchAddress = nil
             guard let value = request["address"] as? String, let uuid = UUID(uuidString: value),
                   let peripheral = devices[uuid] ?? central.retrievePeripherals(withIdentifiers: [uuid]).first else {
                 reply(error: "Unknown peripheral"); return
@@ -143,27 +235,40 @@ final class Bluetooth: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate 
             info["manufacturer_data"] = [String(vendor): bytes.dropFirst(2).map { String(format: "%02x", $0) }.joined()]
         }
         advertisements[peripheral.identifier] = info
+        let signature = activitySignature(advertisementData[CBAdvertisementDataManufacturerDataKey] as? Data)
+        var watchReason: String?
+        if watchAddress == peripheral.identifier.uuidString.lowercased() {
+            watchReason = advertisementGate?.observe(signature, now: ProcessInfo.processInfo.systemUptime)
+        }
         if operation == "scan", pending?["first"] as? Bool == true {
             central.stopScan()
             reply([description(peripheral)])
         }
         if operation == "find", let address = pending?["address"] as? String,
-           peripheral.identifier.uuidString.lowercased() == address.lowercased() { central.stopScan(); reply(description(peripheral)) }
+           peripheral.identifier.uuidString.lowercased() == address.lowercased() {
+            if pending?["watch"] as? Bool == true && watchReason == nil { return }
+            var result = description(peripheral)
+            if let watchReason { result["reconnect_reason"] = watchReason }
+            advertisementGate?.accepted(signature, now: ProcessInfo.processInfo.systemUptime)
+            central.stopScan()
+            reply(result)
+        }
     }
     func centralManager(_ central: CBCentralManager, didConnect peripheral: CBPeripheral) {
         guard operation == "connect", peripheral === current else { central.cancelPeripheralConnection(peripheral); return }
+        resumeRequested = nil
         peripheral.discoverServices(nil)
     }
     func peripheral(_ peripheral: CBPeripheral, didDiscoverServices error: Error?) {
         guard operation == "connect" else { return }
-        if let error { reply(error: error.localizedDescription); return }
+        if let error { reply(error: bluetoothError(error)); return }
         serviceCount = peripheral.services?.count ?? 0
         if serviceCount == 0 { reply(error: "Peripheral has no services"); return }
         for service in peripheral.services ?? [] { peripheral.discoverCharacteristics(nil, for: service) }
     }
     func peripheral(_ peripheral: CBPeripheral, didDiscoverCharacteristicsFor service: CBService, error: Error?) {
         guard operation == "connect" else { return }
-        if let error { reply(error: error.localizedDescription); return }
+        if let error { reply(error: bluetoothError(error)); return }
         for characteristic in service.characteristics ?? [] { characteristics[characteristic.uuid.uuidString.lowercased()] = characteristic }
         serviceCount -= 1
         if serviceCount == 0 { reply(description(peripheral)) }
@@ -183,17 +288,18 @@ final class Bluetooth: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate 
         }
     }
     func peripheral(_ peripheral: CBPeripheral, didUpdateNotificationStateFor characteristic: CBCharacteristic, error: Error?) {
-        if operation == "notify", (pending?["uuid"] as? String)?.lowercased() == characteristic.uuid.uuidString.lowercased() { reply(error: error?.localizedDescription) }
+        if operation == "notify", (pending?["uuid"] as? String)?.lowercased() == characteristic.uuid.uuidString.lowercased() { reply(error: error.map(bluetoothError)) }
     }
     func peripheral(_ peripheral: CBPeripheral, didWriteValueFor characteristic: CBCharacteristic, error: Error?) {
-        if operation == "write" { reply(error: error?.localizedDescription) }
+        if operation == "write" { reply(error: error.map(bluetoothError)) }
     }
     func peripheral(_ peripheral: CBPeripheral, didUpdateValueFor characteristic: CBCharacteristic, error: Error?) {
-        if let error { emit(["type": "error", "text": error.localizedDescription]); return }
+        if let error { emit(["type": "error", "text": bluetoothError(error)]); return }
         if let data = characteristic.value { emit(["type": "notification", "uuid": characteristic.uuid.uuidString.lowercased(), "data": data.base64EncodedString()]) }
     }
 }
 
+#if !TEST_BLUETOOTH_POLICY
 @main struct BridgeMain {
     static func main() {
         let bluetooth = Bluetooth()
@@ -211,3 +317,4 @@ final class Bluetooth: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate 
         dispatchMain()
     }
 }
+#endif

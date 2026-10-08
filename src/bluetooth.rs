@@ -73,6 +73,17 @@ pub struct RingState {
     pub has_debug_info: bool,
     pub is_dark: bool,
 }
+impl RingState {
+    pub fn advertisement_signature(&self) -> String {
+        format!(
+            "{:08x}:{}:{}:{}",
+            self.fingerprint,
+            self.collection_count,
+            u8::from(self.in_collection_state),
+            u8::from(self.is_moving)
+        )
+    }
+}
 pub fn advertisement(data: &[u8]) -> Result<RingState> {
     let data = if data.len() == 8 { &data[2..] } else { data };
     ensure!(
@@ -411,6 +422,11 @@ impl Bluetooth {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn advertisement_baseline_matches_the_native_watch_filter() {
+        let state = advertisement(&[1, 0, 0, 0, 2, 0xa0]).unwrap();
+        assert_eq!(state.advertisement_signature(), "00000001:2:1:1");
+    }
     #[test]
     fn request_metrics_include_failed_reads_and_keep_s_r_c_separate() {
         let mut metrics = ReadMetrics::default();

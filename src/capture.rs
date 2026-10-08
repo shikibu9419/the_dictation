@@ -5,8 +5,9 @@ use crate::{
     output::Output,
     recognition::{Client, Options, display_event},
 };
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 use base64::{Engine, engine::general_purpose::STANDARD};
+use pebble_index::reception::connection::{ConnectionPolicy, WatchReason};
 use pebble_index::reception::scheduler::{Decision, Request, Scheduler};
 use serde_json::{Value, json};
 use std::{
@@ -23,6 +24,9 @@ struct Received {
     output: Output,
     collecting: Option<bool>,
     range_end: Option<u16>,
+    last_state: Option<RingState>,
+    last_advertisement: Option<String>,
+    connection: ConnectionPolicy,
     observation_origin: Instant,
     observation_sequence: u64,
     button_timing: crate::button_timing::ButtonTiming,
@@ -59,10 +63,23 @@ impl Received {
         self.observation_origin.elapsed().as_millis() as u64
     }
     fn range(&mut self, start: u16, end: u16) -> Result<()> {
+        if self.range_end.is_some_and(|old| old != end) {
+            self.connection.activity(self.millis());
+        }
         self.range_end = Some(end);
         self.send(json!({"type":"range","start":start,"end":end}))
     }
     fn state(&mut self, state: &RingState) -> Result<()> {
+        if state.in_collection_state
+            || self
+                .last_state
+                .as_ref()
+                .is_some_and(|old| old.collection_count != state.collection_count)
+        {
+            self.connection.activity(self.millis());
+        }
+        self.last_state = Some(state.clone());
+        self.last_advertisement = Some(state.advertisement_signature());
         self.button_timing
             .observe(state.in_collection_state, &self.output);
         self.send(
@@ -77,6 +94,14 @@ impl Received {
             self.collecting = Some(state.in_collection_state);
         }
         self.send(json!({"type":"state","collecting":state.in_collection_state}))
+    }
+    fn progress(&mut self) {
+        if let Some(duration) = self.connection.progress(self.millis()) {
+            self.output.debug(format!(
+                "BLE communication recovered recovery_ms={duration} next_collection={:?}",
+                self.next
+            ));
+        }
     }
 }
 pub fn startup_start(
@@ -97,6 +122,11 @@ pub fn startup_start(
     }
     end
 }
+enum DownloadEnd {
+    Fetched,
+    Idle,
+}
+
 async fn download(
     ble: &mut Bluetooth,
     received: &mut Received,
@@ -104,7 +134,7 @@ async fn download(
     output: &Output,
     fetch: bool,
     interval: f64,
-) -> Result<RingState> {
+) -> Result<DownloadEnd> {
     let mut cached = HashMap::new();
     let mut state_started = received.millis();
     let mut state = received.read(ble.state(args.timeout)).await?;
@@ -162,8 +192,19 @@ async fn download(
     let mut caught_up = false;
     loop {
         if scheduler.caught_up() {
+            received.progress();
             if fetch && !state.in_collection_state {
-                return Ok(state);
+                return Ok(DownloadEnd::Fetched);
+            }
+            if !fetch
+                && received
+                    .connection
+                    .idle(received.millis(), state.in_collection_state, true)
+            {
+                output.debug(
+                    "BLE advertisement wait reason=idle idle_ms=3600000; retained receive cursor",
+                );
+                return Ok(DownloadEnd::Idle);
             }
             if !caught_up {
                 received.send(json!({"type":"caught_up"}))?;
@@ -223,6 +264,8 @@ async fn download(
                     .send(json!({"type":"collection","index":index,"raw":STANDARD.encode(&raw)}))?;
                 scheduler.collection(index)?;
                 received.next = Some(scheduler.cursor());
+                received.connection.activity(received.millis());
+                received.progress();
                 output.debug(format!(
                     "collection={index} transfer took {:.3}s",
                     began.elapsed().as_secs_f64()
@@ -259,89 +302,97 @@ async fn receive(
         output: output.clone(),
         collecting: None,
         range_end: None,
+        last_state: None,
+        last_advertisement: None,
+        connection: ConnectionPolicy::default(),
         observation_origin: Instant::now(),
         observation_sequence: 0,
         button_timing: Default::default(),
     };
     output.event(&json!({"type":"ready"}));
     let mut paired = false;
-    // Try the saved peripheral immediately; do not wait for a fresh advertisement.
-    // A failed direct attempt falls back to scanning.
-    let mut reconnect_remaining = 1u8;
+    let mut last_mode = None;
     loop {
-        let direct = reconnect_remaining > 0;
-        let device = if direct {
-            reconnect_remaining -= 1;
-            output.debug(format!("Direct reconnect to known Index; attempts_left={reconnect_remaining}; resume_collection={:?}", received.next));
-            // Do not reuse cached manufacturer data as a fresh button edge.
-            json!({"address":address})
-        } else {
-            output.debug("Scanning for Index");
-            received
-                .read(ble.request(json!({"type":"find","address":address}), args.timeout))
-                .await?
-        };
-        if device.is_null() {
-            if fetch {
-                bail!("Index not advertising; press ring button");
+        let mode = received.connection.mode(received.millis());
+        if mode != last_mode {
+            output.debug(format!(
+                "BLE connection policy mode={mode:?} next_collection={:?}",
+                received.next
+            ));
+            last_mode = mode;
+        }
+        let mut stage = "connect";
+        let result: Result<DownloadEnd> = async {
+            if let Some(reason) = mode {
+                stage = "advertisement_wait";
+                let request = json!({"type":"find","address":address,"watch":true,
+                    "baseline":received.last_advertisement,
+                    "retry_interval_ms": if reason == WatchReason::Failure {30_000} else {0}});
+                let device = received.read(ble.request(request, args.timeout)).await?;
+                if device.is_null() {
+                    return Ok(DownloadEnd::Idle);
+                }
+                output.debug(format!("BLE reconnect hint: {device}"));
+                received.connection.resume_hint(received.millis());
+                if let Some(state) = advertised_state(&device) {
+                    received.last_advertisement = Some(state.advertisement_signature());
+                    if !received.initialized
+                        && state.in_collection_state
+                        && received.initial_count.is_none()
+                    {
+                        received.initial_count = Some(state.collection_count);
+                    }
+                }
             }
-            continue;
-        }
-        output.debug(format!("Discovered: {device}"));
-        if let Some(state) = advertised_state(&device)
-            && !received.initialized
-            && state.in_collection_state
-            && received.initial_count.is_none()
-        {
-            received.initial_count = Some(state.collection_count);
-        }
-        let result = async {
+            stage = "connect";
             let started = Instant::now();
-            output.debug(format!("Connecting: {address}"));
+            output.debug(format!(
+                "Connecting: {address}; resume_collection={:?}",
+                received.next
+            ));
             let pair = !paired || args.pair;
             received
-                .read(ble.connect(
-                    &address,
-                    pair,
-                    if direct {
-                        args.timeout.min(5.0)
-                    } else if pair {
-                        args.timeout
-                    } else {
-                        args.timeout.min(8.0)
-                    },
-                ))
+                .read(ble.connect(&address, pair, args.timeout.min(5.0)))
                 .await?;
             paired = true;
             output.debug(format!(
                 "Connected: {address}; connection took {:.3}s",
                 started.elapsed().as_secs_f64()
             ));
+            stage = "subscribe";
             received.read(ble.subscribe(args.timeout)).await?;
             received.send(json!({"type":"connected"}))?;
-            reconnect_remaining = 3;
+            stage = "receive";
             download(&mut ble, &mut received, &args, &output, fetch, interval).await
         }
         .await;
-        if result.is_err() {
-            received.button_timing.disconnect(&output);
-            received.send(json!({"type":"connection_lost"}))?;
+        // A watch timeout keeps native discovery running, without a disconnect
+        // command or artificial scan gap between successive waits.
+        if stage == "advertisement_wait" && result.is_ok() {
+            continue;
         }
+        if result.is_err() {
+            received.connection.failed(received.millis());
+            received.button_timing.disconnect(&output);
+        }
+        received.send(json!({"type":"connection_lost"}))?;
         ble.unsubscribe().await;
         ble.disconnect().await;
         match result {
-            Ok(_) => {
-                if fetch {
-                    ble.close().await;
-                    return Ok(());
-                }
+            Ok(DownloadEnd::Fetched) => {
+                ble.close().await;
+                return Ok(());
             }
+            Ok(DownloadEnd::Idle) => continue,
             Err(error) => {
                 let text = format!("{error:#}");
+                output.debug(format!(
+                    "BLE failure stage={stage} error={error:#}; resume_collection={:?}",
+                    received.next
+                ));
                 if fetch
                     || crate::bluetooth::encryption_rejected(&text)
                     || crate::bluetooth::pairing_removed(&text)
-                    || text.contains("Telesto read failed")
                     || text.contains("Invalid")
                     || text.contains("length mismatch")
                     || text.contains("exceeds")
@@ -350,15 +401,16 @@ async fn receive(
                 {
                     return Err(error);
                 }
-                output.debug(format!(
-                    "Bluetooth connection/scan failed: {error:#}; resume from collection={:?}",
-                    received.next
-                ));
             }
         }
+        let delay_ms = received.connection.retry_delay_ms();
+        output.debug(format!(
+            "BLE retry delay_ms={delay_ms} mode={:?}",
+            received.connection.mode(received.millis())
+        ));
         received
             .read(async {
-                tokio::time::sleep(Duration::from_secs_f64(interval)).await;
+                tokio::time::sleep(Duration::from_millis(delay_ms)).await;
                 Ok(())
             })
             .await?;
@@ -415,6 +467,9 @@ mod gui_tests {
             output: Output::new(false, None).unwrap(),
             collecting: None,
             range_end: None,
+            last_state: None,
+            last_advertisement: None,
+            connection: ConnectionPolicy::default(),
             observation_origin: Instant::now(),
             observation_sequence: 0,
             button_timing: Default::default(),
@@ -459,6 +514,9 @@ mod gui_tests {
             output,
             collecting: None,
             range_end: None,
+            last_state: None,
+            last_advertisement: None,
+            connection: ConnectionPolicy::default(),
             observation_origin: Instant::now(),
             observation_sequence: 0,
             button_timing: Default::default(),

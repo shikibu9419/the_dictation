@@ -54,10 +54,29 @@ falseまたは対応するfinalで終了猶予（初期値50ms）を始める。
 
 音声Cは受信直後に配送する。`BLE schedule` は要求と期限超過、`BLE read totals` はS/R/C別の累積要求数・失敗数・通信時間・応答バイト数を60秒ごとと切断時に残す。接続継続時間も切断時に記録する。電池残量を読む命令はこの実装では未確認のため、消費率を推定した数値は表示しない。実機の電池推移の測定は未実施。
 
-接続の「未操作1時間 / 通信障害1分で広告待ち」、ASRワーカー異常時の再起動・PCM再送も未完了。受入条件は [BLE受信設計](ble-reception-design.md)、プロトコル根拠は [解析記録](ble-protocol-findings.md) を参照。
+## 接続維持と広告待ち
+
+`reception/connection.rs` が接続の寿命を決める。収集中でも回収待ちでもない状態で1時間操作がなければ切断して広告待ちに入る。Sの収集中フラグ、件数の変化、Cの受信が操作時刻を更新する。通常のS成功だけでは未操作タイマーを延ばさない。
+
+接続・通信の失敗時は250ms〜5秒の間隔で保存UUIDへ再接続する。連続1分の障害後は広告待ちへ移る。接続できただけでは障害期間を消さず、S/Rで回収待ちなしを確認するか、Cの転送が進んだ時点を復旧とする。ペアリング不整合・不正データのエラーは自動再試行を停止する。
+
+広告待ちではCoreBluetoothの探索を維持し、同じ広告の反復では接続しない。件数・収集中・動き・機器fingerprintの変化、2秒以上途絶えた広告の再出現、Macのwake/session復帰、Bluetooth復帰で先行接続を試す。障害後の広告待ちに限り、同じ広告でも30秒間隔の復旧確認を許可する。未操作による広告待ちは、この定期確認を行わない。これは接続を再開するヒントであり、広告からshort/longや物理エッジは作らない。
+
+`BLE failure` に失敗段階・OSエラーのdomain/code・再開cursor、`BLE reconnect hint` に再開理由、`BLE communication recovered` に障害からの復旧時間を残す。再接続時も受信cursorと音声ストアを維持し、起動時のflushを繰り返さない。実機の復帰時間・電池消費の測定は未実施。
+
+ASRワーカー異常時の再起動・PCM再送、IPC上限の確認は未完了。受入条件は [BLE受信設計](ble-reception-design.md)、プロトコル根拠は [解析記録](ble-protocol-findings.md) を参照。
 
 ## 画面を出さない検証
 
 `cargo test --release --lib --bin pebble-index --bin index-voice --test adapters --test reception_pipeline`
 
 純粋な状態遷移、受信ストア、表示モデル、合成TLVからmock ASRまでのIPCを確認する。Bluetooth実機・マイク・ウィンドウ表示は実行しない。
+
+広告フィルターは次の専用mainで検証できる。`Bluetooth`・`CBCentralManager`・`NSWorkspace`を生成せず、合成広告だけを扱う。
+
+```sh
+xcrun swiftc -O -parse-as-library -D TEST_BLUETOOTH_POLICY \
+  native/Bluetooth.swift tests/native/BluetoothPolicyTests.swift \
+  -o /tmp/index-bluetooth-policy-tests
+/tmp/index-bluetooth-policy-tests
+```
