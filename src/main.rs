@@ -1,5 +1,6 @@
 mod adapters;
 mod audio_file;
+mod audio_level;
 mod bluetooth;
 mod capture;
 mod collection;

@@ -40,6 +40,38 @@ static BOOL selectKeyboardSource(BOOL japanese) {
 static NSVisualEffectView *glass;
 static CALayer *neon, *halo;
 static CAGradientLayer *rim, *bloom;
+static NSTimer *audioTimer;
+static double audioTarget, audioEnvelope, audioUpdated;
+static void applyAudioGlow(double level) {
+    [CATransaction begin];
+    [CATransaction setDisableActions:YES];
+    CIFilter *blur = [CIFilter filterWithName:@"CIGaussianBlur"];
+    [blur setValue:@(3.5 + 5.5 * level) forKey:kCIInputRadiusKey];
+    halo.filters = @[blur];
+    ((CAShapeLayer *)bloom.mask).lineWidth = 6 + 7 * level;
+    bloom.opacity = 0.8 + 0.2 * level;
+    [CATransaction commit];
+}
+void index_panel_audio(double level, bool active) {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        if (!active) {
+            [audioTimer invalidate]; audioTimer = nil;
+            audioTarget = audioEnvelope = 0;
+            applyAudioGlow(0);
+            return;
+        }
+        audioTarget = isfinite(level) ? fmax(0, fmin(1, level)) : 0;
+        audioUpdated = CACurrentMediaTime();
+        if (audioTimer) return;
+        audioTimer = [NSTimer scheduledTimerWithTimeInterval:1.0 / 30 repeats:YES block:^(NSTimer *timer) {
+            double age = CACurrentMediaTime() - audioUpdated;
+            double target = audioTarget * exp(-fmax(0, age - 0.15) / 0.25);
+            double smoothing = target > audioEnvelope ? 0.55 : 0.18;
+            audioEnvelope += (target - audioEnvelope) * smoothing;
+            applyAudioGlow(audioEnvelope);
+        }];
+    });
+}
 
 static CAGradientLayer *makeRim(CGFloat width, float opacity) {
     CAGradientLayer *gradient = [CAGradientLayer layer];
@@ -62,9 +94,11 @@ static void layoutRim(void) {
     CGRect bounds = panel.contentView.bounds;
     neon.frame = bounds;
     halo.frame = bounds;
-    CGFloat radius = circularPanel ? (MIN(bounds.size.width, bounds.size.height) - 20) / 2 : 18;
+    CGFloat inset = circularPanel ? 20 : 10;
+    glass.frame = NSInsetRect(bounds, inset, inset);
+    CGFloat radius = circularPanel ? (MIN(bounds.size.width, bounds.size.height) - 2 * inset) / 2 : 18;
     glass.layer.cornerRadius = radius;
-    CGPathRef path = CGPathCreateWithRoundedRect(CGRectInset(bounds, 10, 10), radius, radius, NULL);
+    CGPathRef path = CGPathCreateWithRoundedRect(CGRectInset(bounds, inset, inset), radius, radius, NULL);
     for (CAGradientLayer *gradient in @[rim, bloom]) {
         gradient.frame = bounds;
         gradient.mask.frame = bounds;
@@ -217,7 +251,7 @@ void index_panel_editing(bool editing) {
         else [[gpuiView inputContext] deactivate];
     });
 }
-void index_panel_hide(void) { dispatch_async(dispatch_get_main_queue(), ^{
+void index_panel_hide(void) { index_panel_audio(0, false); dispatch_async(dispatch_get_main_queue(), ^{
     [[gpuiView inputContext] deactivate];
     [panel orderOut:nil];
     NSLog(@"[Index panel] hidden visible=%d", panel.isVisible);

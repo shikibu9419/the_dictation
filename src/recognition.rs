@@ -335,6 +335,11 @@ impl Recognition {
     }
     fn add(&mut self, part: Part) -> Result<()> {
         let key = part.key.clone();
+        if self.live.is_none() && !part.final_part && !part.samples.is_empty()
+            && !self.lifecycle.lock().unwrap().suppressed(&key) {
+            emit(json!({"type":"audio_level", "recording":key,
+                "level":crate::audio_level::normalized(&part.samples)}));
+        }
         if !self.audio.contains_key(&key) {
             let empty = part.final_part && part.samples.is_empty();
             emit(json!({"type":"recording","recording":key,"empty":empty}));

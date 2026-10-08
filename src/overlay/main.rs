@@ -26,6 +26,7 @@ unsafe extern "C" {
     fn index_panel_show(target: i32);
     fn index_panel_editing(editing: bool);
     fn index_panel_hide();
+    fn index_panel_audio(level: f64, active: bool);
     fn index_panel_resize(width: f64, height: f64, circular: bool);
     fn index_reduce_motion() -> bool;
     fn index_panel_visible() -> bool;
@@ -146,7 +147,7 @@ fn read_events(reader: impl BufRead, generation: Option<u64>) {
                 if let Ok(value) = serde_json::from_str::<serde_json::Value>(&line)
                     && matches!(
                         value["type"].as_str(),
-                        Some("paste_result" | "copy_result" | "paste_permission")
+                        Some("paste_result" | "copy_result" | "paste_permission" | "audio_level")
                     )
                 {
                     if tx
@@ -229,6 +230,9 @@ impl Overlay {
     }
 
     fn update_panel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.presentation.live_text || !self.model.visible().is_some_and(|item| item.phase == Phase::Recording) {
+            unsafe { index_panel_audio(0., false); }
+        }
         let was_editing = self.editing;
         let editable = self
             .model
@@ -496,12 +500,12 @@ impl Render for Overlay {
             })
             .unwrap_or(30.);
         let body_height = measured.clamp(30., 300.);
-        let height = if circular { 76. } else { body_height + 44. };
+        let height = if circular { 96. } else { body_height + 44. };
         if self.panel_height != height || self.panel_circular != circular {
             self.panel_height = height;
             self.panel_circular = circular;
             unsafe {
-                index_panel_resize(if circular { 76. } else { 580. }, height as f64, circular);
+                index_panel_resize(if circular { 96. } else { 580. }, height as f64, circular);
             }
         }
         div()
@@ -513,7 +517,7 @@ impl Render for Overlay {
             .on_action(cx.listener(Self::paste))
             .on_action(cx.listener(Self::dismiss))
             .size_full()
-            .p(px(10.))
+            .p(px(if circular { 20. } else { 10. }))
             .font_family(".AppleSystemUIFont")
             .text_size(px(22.5))
             .text_color(rgb(0xf3f6fa))
@@ -723,6 +727,11 @@ fn main() -> anyhow::Result<()> {
                             }
                             Message::Menu(1) => { if let Some(backend) = &mut this.backend { let _ = backend.send(serde_json::json!({"type":"permission"})); } else { unsafe { index_permission(); } } },
                             Message::Control(event, generation) if accepts_generation(this.backend.as_ref().map(|b| b.generation), generation) => {
+                                if event["type"] == "audio_level" {
+                                    let active = !this.presentation.live_text && this.model.visible().is_some_and(|item|
+                                        item.phase == Phase::Recording && (item.recording.is_none() || item.recording.as_deref() == event["recording"].as_str()));
+                                    unsafe { index_panel_audio(event["level"].as_f64().unwrap_or(0.), active); }
+                                }
                                 if event["type"] == "paste_result" {
                                     this.pasting = false;
                                     this.update_panel(window, cx);
