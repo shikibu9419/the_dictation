@@ -7,10 +7,14 @@ use anyhow::{Context, Result, bail, ensure};
 use base64::{Engine, engine::general_purpose::STANDARD};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use std::{collections::VecDeque, time::Duration};
+use std::{
+    collections::VecDeque,
+    time::{Duration, Instant},
+};
 use tokio::{process::Command, time::timeout};
 pub const CONTROL: &str = "c0ef558a-2058-fabf-a140-8d5acde50b39";
 pub const DATA: &str = "daad3d52-237c-90a7-b54b-8854a134d801";
+pub const SYSTEM_INPUT: &str = "1d1f4039-23f5-33b2-c24e-704351f20585";
 pub const MAX_SIZE: usize = 655360;
 pub fn pairing_removed(message: &str) -> bool {
     message
@@ -104,6 +108,7 @@ pub struct Bluetooth {
     next: u64,
     pending: VecDeque<Value>,
     pub connected: bool,
+    auxiliary_subscribed: bool,
     output: Output,
 }
 impl Bluetooth {
@@ -126,10 +131,16 @@ impl Bluetooth {
             next: 0,
             pending: VecDeque::new(),
             connected: false,
+            auxiliary_subscribed: false,
             output,
         })
     }
     fn observe(&mut self, event: &Value) {
+        if event["type"] == "notification" && event["uuid"] == SYSTEM_INPUT {
+            // Protocol semantics are not known. Preserve evidence, never turn
+            // arbitrary bytes into a button edge or a Telesto response.
+            self.output.debug(format!("BLE auxiliary push: {event}"));
+        }
         if event["type"] == "disconnected" {
             self.output.debug(format!("BLE disconnect detail: {event}"));
             self.connected = false;
@@ -167,7 +178,7 @@ impl Bluetooth {
                 if event["type"] == "error" {
                     bail!("Bluetooth: {}", event["text"]);
                 }
-                if event["type"] == "notification" {
+                if event["type"] == "notification" && (event["uuid"] == CONTROL || event["uuid"] == DATA) {
                     self.pending.push_back(event);
                 }
             }
@@ -223,10 +234,47 @@ impl Bluetooth {
             )
             .await?;
         }
+        let services = self
+            .request(json!({"type":"inspect"}), seconds.min(5.0))
+            .await?;
+        self.output.debug(format!("BLE services: {services}"));
+        let auxiliary_notify = services.as_array().into_iter().flatten().any(|service| {
+            service["characteristics"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .any(|c| {
+                    c["uuid"] == SYSTEM_INPUT
+                        && c["properties"]
+                            .as_array()
+                            .is_some_and(|p| p.iter().any(|v| v == "notify" || v == "indicate"))
+                })
+        });
+        self.auxiliary_subscribed = false;
+        if auxiliary_notify {
+            match self
+                .request(
+                    json!({"type":"notify","uuid":SYSTEM_INPUT,"enabled":true}),
+                    seconds.min(5.0),
+                )
+                .await
+            {
+                Ok(_) => {
+                    self.auxiliary_subscribed = true;
+                    self.output.debug("Auxiliary notifications subscribed for observation; button push format remains unknown");
+                }
+                Err(error) => self.output.debug(format!(
+                    "Auxiliary notification subscription unavailable: {error:#}"
+                )),
+            }
+        }
         Ok(())
     }
     pub async fn unsubscribe(&mut self) {
-        for uuid in [DATA, CONTROL] {
+        for uuid in [SYSTEM_INPUT, DATA, CONTROL] {
+            if uuid == SYSTEM_INPUT && !self.auxiliary_subscribed {
+                continue;
+            }
             if !self.connected {
                 break;
             }
@@ -243,16 +291,23 @@ impl Bluetooth {
     pub async fn read(&mut self, address: u32, length: u32, seconds: f64) -> Result<Vec<u8>> {
         self.pending.clear();
         let mut response = Response::default();
+        let started = Instant::now();
+        let mut first_notification = None;
         let result=timeout(Duration::from_secs_f64(seconds.min(5.0)),async {
             let mut packet=vec![3]; packet.extend(address.to_le_bytes()); packet.extend(0u32.to_le_bytes()); packet.extend(length.to_le_bytes());
             self.request(json!({"type":"write","uuid":CONTROL,"data":STANDARD.encode(packet),"response":false}),seconds.min(5.0)).await?;
             loop {
                 ensure!(self.connected,"Ring disconnected during Telesto read address=0x{address:08x}");
-                if let Some(data)=response.complete()? { return Ok(data); }
+                if let Some(data)=response.complete()? {
+                    self.output.debug(format!("BLE read address=0x{address:08x} bytes={} first_notification_ms={:?} total_ms={:.1}", data.len(), first_notification, started.elapsed().as_secs_f64()*1000.0));
+                    return Ok(data);
+                }
                 let event=match self.pending.pop_front() { Some(e)=>e,None=>self.helper.event().await? };
                 self.observe(&event);
                 if event["type"]=="error" { bail!("Bluetooth: {}",event["text"]); }
                 if event["type"]!="notification" { continue; }
+                if event["uuid"] != CONTROL && event["uuid"] != DATA { continue; }
+                first_notification.get_or_insert_with(|| started.elapsed().as_secs_f64()*1000.0);
                 let bytes=STANDARD.decode(event["data"].as_str().context("Missing notification payload")?)?;
                 response.add(event["uuid"].as_str().unwrap_or(""),&bytes)?;
             }
@@ -262,7 +317,10 @@ impl Bluetooth {
     pub async fn state(&mut self, seconds: f64) -> Result<RingState> {
         let data = self.read(0x4003000e, 10, seconds).await?;
         ensure!(data.len() == 10, "Invalid advertisement read response");
-        self.output.debug(format!("Ring state raw={}", data.iter().map(|b| format!("{b:02x}")).collect::<String>()));
+        self.output.debug(format!(
+            "Ring state raw={}",
+            data.iter().map(|b| format!("{b:02x}")).collect::<String>()
+        ));
         advertisement(&data[2..])
     }
     pub async fn range(&mut self, seconds: f64) -> Result<(u16, u16)> {
