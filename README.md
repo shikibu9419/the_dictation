@@ -298,6 +298,10 @@ Macの実際のBLE探索でリングを検出し、30秒探索がIPCの待機期
 
 ### タップ操作とジェスチャの拡張フック
 
+`--log` の `button_timing` 行はJSON形式です。`press_duration` は同じ `pid`・`press_id` の押下と解放を対応付け、`observed_down_at`、`observed_up_at`、`observed_hold_ms` を記録します。`down_sample_gap_ms`・`up_sample_gap_ms` は各エッジ周辺の観測間隔で、BLEによる測定の粗さを示します。初回観測ですでに押下中なら `start_unknown`、解放前に切断したら `interrupted_before_up` と記録します。
+
+短押しの `button_collection` 行にはcollection番号・short/long分類とメタデータを残します。取得しているボタンメタデータにはエッジ時刻がないため、`physical_hold_ms` は `null` です。`audio_duration_ms` は音声の長さであり、押下持続時間ではありません。押下エッジを取り逃した短押しについて、音声量や次のタップまでの間隔から押下時間を推定しません。
+
 設定画面でシングルタップとダブルタップに、それぞれ次の動作を割り当てられます。初期設定はシングル＝履歴、ダブル＝ペーストです。
 
 - **履歴を開く**：最新の確定結果を編集できるウィンドウで開きます。上下カーソルで前後の履歴へ移動できます。履歴がない場合は空の編集欄を開きます。

@@ -22,7 +22,7 @@ struct Received {
     output: Output,
     collecting: Option<bool>,
     inactive_since: Option<Instant>,
-    raw_press_since: Option<Instant>,
+    button_timing: crate::button_timing::ButtonTiming,
 }
 impl Received {
     fn send(&self, event: Value) -> Result<()> {
@@ -32,15 +32,8 @@ impl Received {
         Ok(())
     }
     fn state(&mut self, state: &RingState) -> Result<()> {
-        if state.in_collection_state && self.raw_press_since.is_none() {
-            self.raw_press_since = Some(Instant::now());
-            self.output
-                .debug("Button timing: collecting rising edge (receiver observation)");
-        } else if !state.in_collection_state
-            && let Some(start) = self.raw_press_since.take()
-        {
-            self.output.debug(format!("Button timing: collecting falling edge; observed_ms={}; source=ring_state; not physical button duration", start.elapsed().as_millis()));
-        }
+        self.button_timing
+            .observe(state.in_collection_state, &self.output);
         self.send(json!({"type":"button_state","pressed":state.in_collection_state}))?;
         if state.in_collection_state {
             self.inactive_since = None;
@@ -209,7 +202,7 @@ async fn receive(
         output: output.clone(),
         collecting: None,
         inactive_since: None,
-        raw_press_since: None,
+        button_timing: Default::default(),
     };
     output.event(&json!({"type":"ready"}));
     let mut paired = false;
@@ -271,6 +264,7 @@ async fn receive(
         }
         .await;
         if result.is_err() {
+            received.button_timing.disconnect(&output);
             received.send(json!({"type":"connection_lost"}))?;
         }
         ble.unsubscribe().await;
@@ -360,7 +354,7 @@ mod gui_tests {
             output,
             collecting: None,
             inactive_since: None,
-            raw_press_since: None,
+            button_timing: Default::default(),
         };
         let mut state = crate::bluetooth::advertisement(&[0, 0, 0, 0, 0, 0]).unwrap();
         received.state(&state).unwrap();

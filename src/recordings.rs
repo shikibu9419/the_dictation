@@ -30,7 +30,11 @@ impl Recordings {
     pub fn add(&mut self, index: u16, raw: &[u8], output: &Output) -> Result<Vec<Part>> {
         let item = decode(raw)?;
         let records = crate::collection::records(raw)?;
-        let header = |id| records.get(&id).map(|bytes| bytes.iter().map(|b| format!("{b:02x}")).collect::<String>());
+        let header = |id| {
+            records
+                .get(&id)
+                .map(|bytes| bytes.iter().map(|b| format!("{b:02x}")).collect::<String>())
+        };
         output.debug(format!("Collection boundary evidence index={index}: metadata82={:?} button_sequence83={:?} lifetime_count84={:?}; button sequence is stored metadata, not a physical key edge", header(82), header(83), header(84)));
         output.debug(format!(
             "collection={index} bytes={} multipart={} final={} recording_start={:?}",
@@ -47,6 +51,32 @@ impl Recordings {
                 item.buttons
             ));
         }
+        if item.final_part
+            && item
+                .buttons
+                .as_ref()
+                .is_some_and(|buttons| !buttons.is_empty())
+        {
+            output.debug(format!(
+                "button_timing {}",
+                serde_json::json!({
+                    "event":"button_collection", "collection":index,
+                    "recording_start":item.start,
+                    "classification":item.buttons.as_ref().and_then(|buttons| buttons.last()),
+                    "sequence_count":item.buttons.as_ref().map(Vec::len),
+                "metadata":records.iter().filter(|(id, _)| **id != 80 && **id != 81)
+                    .map(|(id, data)| (id.to_string(), serde_json::json!({
+                        "bytes":data.len(), "hex":data.iter().take(256).map(|b| format!("{b:02x}")).collect::<String>()
+                    }))).collect::<serde_json::Map<String, serde_json::Value>>(),
+                    "physical_down_at":null, "physical_up_at":null, "physical_hold_ms":null,
+                    "status":"button_metadata_has_no_edge_timestamps",
+                    "audio_samples":item.samples.as_ref().map(Vec::len),
+                    "audio_rate":item.rate,
+                    "audio_duration_ms":item.samples.as_ref().zip(item.rate)
+                        .map(|(samples, rate)| samples.len() as f64 * 1000. / rate as f64)
+                })
+            ));
+        }
         if !item.multipart {
             // Button-only collections can carry a few dummy PCM samples.
             // These are not utterances and must not create another UI item or
@@ -54,10 +84,16 @@ impl Recordings {
             if let (Some(samples), Some(rate)) = (&item.samples, item.rate)
                 && samples.len() * 1000 < rate as usize * 150
             {
-                output.debug(format!("Empty result for short collection={index}: {} samples (<150ms), buttons={:?}", samples.len(), item.buttons));
+                output.debug(format!(
+                    "Empty result for short collection={index}: {} samples (<150ms), buttons={:?}",
+                    samples.len(),
+                    item.buttons
+                ));
                 return Ok(vec![Part {
                     key: format!("({index}, {:?})", item.start),
-                    samples: vec![], rate, final_part: true,
+                    samples: vec![],
+                    rate,
+                    final_part: true,
                     next: index.wrapping_add(1),
                 }]);
             }

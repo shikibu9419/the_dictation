@@ -2,6 +2,7 @@ mod adapters;
 mod audio_file;
 mod audio_level;
 mod bluetooth;
+mod button_timing;
 mod capture;
 mod collection;
 mod config;
