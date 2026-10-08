@@ -355,19 +355,10 @@ mod gui_tests {
         state.in_collection_state = false;
         received.inactive_since = Some(Instant::now() - Duration::from_millis(300));
         received.state(&state).unwrap();
-        let events: Vec<Value> = std::fs::read_to_string(log)
-            .unwrap()
-            .lines()
-            .map(|l| serde_json::from_str(l).unwrap())
-            .collect();
-        assert_eq!(
-            events,
-            vec![
-                json!({"type":"state","collecting":false}),
-                json!({"type":"state","collecting":true}),
-                json!({"type":"state","collecting":false})
-            ]
-        );
+        let diagnostics = std::fs::read_to_string(log).unwrap();
+        assert_eq!(diagnostics.matches("Recording state edge").count(), 3);
+        assert!(!diagnostics.lines().any(|line| line.starts_with('{')),
+            "Raw BLE edges must not bypass logical input state events");
         let mut states = vec![];
         while let Ok(value) = rx.try_recv() {
             states.push(value["collecting"].as_bool().unwrap());

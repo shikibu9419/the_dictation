@@ -25,8 +25,31 @@ pub struct Settings {
     pub input: InputSource,
     pub speech: SpeechModel,
     pub whisper_model: Option<PathBuf>,
+    /// None preserves the model chosen by older settings files.
+    pub batch_speech: Option<SpeechModel>,
+    pub presentation: Presentation,
+}
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(default, deny_unknown_fields)]
+pub struct Presentation {
+    pub live_text: bool,
+    pub final_text: bool,
+}
+impl Default for Presentation {
+    fn default() -> Self { Self { live_text: true, final_text: true } }
+}
+#[derive(Clone, Copy, Debug)]
+pub struct RecognitionPlan {
+    pub live: Option<SpeechModel>,
+    pub batch: SpeechModel,
 }
 impl Settings {
+    pub fn recognition_plan(&self) -> RecognitionPlan {
+        RecognitionPlan {
+            live: self.presentation.live_text.then_some(self.speech),
+            batch: self.batch_speech.unwrap_or(self.speech),
+        }
+    }
     pub fn qwen_dir() -> PathBuf {
         PathBuf::from(std::env::var_os("HOME").unwrap())
             .join("Library/Application Support/Index Voice/qwen-mlx")
@@ -69,13 +92,15 @@ impl Settings {
         })
     }
     pub fn validate(&self) -> Result<()> {
-        if self.speech == SpeechModel::OnDevice {
+        let plan = self.recognition_plan();
+        let uses = |model| plan.live == Some(model) || plan.batch == model;
+        if uses(SpeechModel::OnDevice) {
             ensure!(
                 Self::qwen_ready(),
                 "Qwen3-ASR MLX is not installed; run pebble-index setup-qwen"
             );
         }
-        if self.speech == SpeechModel::WhisperLargeV3 {
+        if uses(SpeechModel::WhisperLargeV3) {
             ensure!(
                 self.model_path().is_file(),
                 "Whisper large-v3 model not downloaded: {}",
@@ -120,11 +145,31 @@ mod tests {
                     input,
                     speech,
                     whisper_model: Some(dir.path().join("model.bin")),
+                    ..Settings::default()
                 };
                 value.save_to(&path).unwrap();
                 assert_eq!(Settings::load_from(&path).unwrap(), value);
             }
         }
+    }
+    #[test]
+    fn legacy_settings_keep_the_selected_model_for_both_engines() {
+        let settings: Settings = serde_json::from_str(r#"{"speech":"on_device"}"#).unwrap();
+        assert_eq!(settings.recognition_plan().live, Some(SpeechModel::OnDevice));
+        assert_eq!(settings.recognition_plan().batch, SpeechModel::OnDevice);
+        assert!(settings.presentation.final_text);
+    }
+    #[test]
+    fn display_options_do_not_change_batch_model_selection() {
+        let mut settings = Settings { speech: SpeechModel::Apple,
+            batch_speech: Some(SpeechModel::OnDevice), ..Settings::default() };
+        settings.presentation.live_text = false;
+        settings.presentation.final_text = false;
+        assert_eq!(settings.recognition_plan().live, None);
+        assert_eq!(settings.recognition_plan().batch, SpeechModel::OnDevice);
+        settings.presentation.live_text = true;
+        assert_eq!(settings.recognition_plan().live, Some(SpeechModel::Apple));
+        assert_eq!(settings.recognition_plan().batch, SpeechModel::OnDevice);
     }
     #[test]
     fn corrupt_settings_are_not_silently_replaced() {

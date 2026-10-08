@@ -293,7 +293,7 @@ impl Speech {
 }
 
 struct Recognition {
-    live: mpsc::UnboundedSender<Job>,
+    live: Option<mpsc::UnboundedSender<Job>>,
     batch: mpsc::UnboundedSender<Job>,
     lifecycle: Arc<Mutex<Lifecycle>>,
     audio: HashMap<String, (Vec<i16>, u32)>,
@@ -301,14 +301,13 @@ struct Recognition {
 }
 impl Recognition {
     fn release(&self, key: &str) -> Result<()> {
-        if self
-            .lifecycle
-            .lock()
-            .unwrap()
-            .released
-            .insert(key.to_owned())
-        {
-            self.live.send(Job::Release(key.to_owned()))?;
+        let newly_released = self.lifecycle.lock().unwrap().released.insert(key.to_owned());
+        if newly_released {
+            if let Some(live) = &self.live {
+                live.send(Job::Release(key.to_owned()))?;
+            } else {
+                self.lifecycle.lock().unwrap().closed.insert(key.to_owned());
+            }
             self.output.debug(format!(
                 "live recognition stopped for recording={key}; receiving remaining audio"
             ));
@@ -368,7 +367,9 @@ impl Recognition {
                 Instant::now(),
             ))?;
         } else if !part.samples.is_empty() && !self.lifecycle.lock().unwrap().suppressed(&key) {
-            self.live.send(Job::Audio(part, Instant::now()))?;
+            if let Some(live) = &self.live {
+                live.send(Job::Audio(part, Instant::now()))?;
+            }
         }
         Ok(())
     }
@@ -409,7 +410,9 @@ impl Recognition {
                         );
                         let (live, live_done) = oneshot::channel();
                         let (batch, batch_done) = oneshot::channel();
-                        self.live.send(Job::Flush(live))?;
+                        if let Some(sender) = &self.live {
+                            sender.send(Job::Flush(live))?;
+                        } else { let _ = live.send(()); }
                         self.batch.send(Job::Flush(batch))?;
                         live_done.await?;
                         batch_done.await?;
@@ -431,7 +434,7 @@ pub async fn worker(options: Options) -> Result<()> {
         settings.validate()?;
     }
     use crate::settings::SpeechModel;
-    let config = match settings.speech {
+    let config = |model| match model {
         SpeechModel::Apple => speech::EngineConfig::Apple,
         SpeechModel::OnDevice => speech::EngineConfig::Qwen {
             root: crate::settings::Settings::qwen_dir(),
@@ -440,12 +443,18 @@ pub async fn worker(options: Options) -> Result<()> {
             model: settings.model_path(),
         },
     };
-    let live = Speech::start("live", &config, &options, life.clone(), output.clone()).await?;
-    let batch = Speech::start("batch", &config, &options, life.clone(), output.clone()).await?;
+    let plan = settings.recognition_plan();
+    let live = if let Some(model) = plan.live {
+        Some(Speech::start("live", &config(model), &options, life.clone(), output.clone()).await?)
+    } else {
+        output.debug("Live recognition disabled; recording goes directly to batch recognition");
+        None
+    };
+    let batch = Speech::start("batch", &config(plan.batch), &options, life.clone(), output.clone()).await?;
     let (ltx, lrx) = mpsc::unbounded_channel();
     let (btx, brx) = mpsc::unbounded_channel();
     let recognition = Recognition {
-        live: ltx,
+        live: live.as_ref().map(|_| ltx),
         batch: btx,
         lifecycle: life,
         audio: HashMap::new(),
@@ -456,7 +465,7 @@ pub async fn worker(options: Options) -> Result<()> {
         &options.command,
     )?));
     let mut tasks = JoinSet::new();
-    tasks.spawn(live.work(lrx, input.clone()));
+    if let Some(live) = live { tasks.spawn(live.work(lrx, input.clone())); }
     tasks.spawn(batch.work(brx, input.clone()));
     tasks.spawn(recognition.input(input));
     emit(json!({"type":"ready"}));
@@ -570,7 +579,7 @@ mod gui_tests {
         let (batch, brx) = mpsc::unbounded_channel();
         (
             Recognition {
-                live,
+                live: Some(live),
                 batch,
                 lifecycle: Arc::new(Mutex::new(Lifecycle::default())),
                 audio: HashMap::new(),
