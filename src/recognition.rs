@@ -73,11 +73,12 @@ struct Speech {
 impl Speech {
     async fn start(
         mode: &'static str,
+        config: &speech::EngineConfig,
         options: &Options,
         lifecycle: Arc<Mutex<Lifecycle>>,
         output: Output,
     ) -> Result<Self> {
-        let engine = speech::create(&options.language, mode, output.clone()).await?;
+        let engine = speech::create(config, &options.language, mode, output.clone()).await?;
         let mut speech = Self {
             engine,
             mode,
@@ -425,8 +426,22 @@ impl Recognition {
 pub async fn worker(options: Options) -> Result<()> {
     let output = Output::new(options.verbose, None)?;
     let life = Arc::new(Mutex::new(Lifecycle::default()));
-    let live = Speech::start("live", &options, life.clone(), output.clone()).await?;
-    let batch = Speech::start("batch", &options, life.clone(), output.clone()).await?;
+    let settings = crate::settings::Settings::load()?;
+    if std::env::var_os("INDEX_VOICE_SPEECH_COMMAND").is_none() {
+        settings.validate()?;
+    }
+    use crate::settings::SpeechModel;
+    let config = match settings.speech {
+        SpeechModel::Apple => speech::EngineConfig::Apple,
+        SpeechModel::OnDevice => speech::EngineConfig::Qwen {
+            root: crate::settings::Settings::qwen_dir(),
+        },
+        SpeechModel::WhisperLargeV3 => speech::EngineConfig::Whisper {
+            model: settings.model_path(),
+        },
+    };
+    let live = Speech::start("live", &config, &options, life.clone(), output.clone()).await?;
+    let batch = Speech::start("batch", &config, &options, life.clone(), output.clone()).await?;
     let (ltx, lrx) = mpsc::unbounded_channel();
     let (btx, brx) = mpsc::unbounded_channel();
     let recognition = Recognition {

@@ -1,4 +1,4 @@
-use super::{EngineCommand, EngineEvent, Reply, SpeechEngine};
+use super::{EngineCommand, EngineConfig, EngineEvent, Reply, SpeechEngine};
 use crate::{
     filter::Filter,
     helper::{Helper, executable},
@@ -15,14 +15,16 @@ pub struct ProcessEngine {
     filter: Option<Filter>,
 }
 impl ProcessEngine {
-    pub async fn start(language: &str, mode: &str, output: Output) -> Result<Self> {
+    pub async fn start(
+        config: &EngineConfig,
+        language: &str,
+        mode: &str,
+        output: Output,
+    ) -> Result<Self> {
         let custom = std::env::var_os("INDEX_VOICE_SPEECH_COMMAND");
-        let settings = crate::settings::Settings::load()?;
         let (mut command, name) = if let Some(path) = custom {
             (Command::new(path), "external speech engine")
-        } else if settings.speech == crate::settings::SpeechModel::OnDevice {
-            settings.validate()?;
-            let root = crate::settings::Settings::qwen_dir();
+        } else if let EngineConfig::Qwen { root } = config {
             let mut command = Command::new(root.join(".venv/bin/python"));
             command
                 .arg("-u")
@@ -31,10 +33,9 @@ impl ProcessEngine {
                 .arg(root)
                 .env("HF_HUB_OFFLINE", "1");
             (command, "Qwen3-ASR MLX")
-        } else if settings.speech == crate::settings::SpeechModel::WhisperLargeV3 {
-            settings.validate()?;
+        } else if let EngineConfig::Whisper { model } = config {
             let mut command = Command::new(std::env::current_exe()?);
-            command.arg("__whisper").arg(settings.model_path());
+            command.arg("__whisper").arg(model);
             (command, "Whisper large-v3")
         } else {
             (

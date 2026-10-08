@@ -54,8 +54,21 @@ pub trait SpeechEngine: Send {
     fn close(&mut self) -> Reply<'_, ()>;
 }
 
-pub async fn create(language: &str, mode: &str, output: Output) -> Result<Box<dyn SpeechEngine>> {
+/// Resolved at the application boundary; adapters never read user settings.
+#[derive(Clone, Debug)]
+pub enum EngineConfig {
+    Apple,
+    Qwen { root: std::path::PathBuf },
+    Whisper { model: std::path::PathBuf },
+}
+
+pub async fn create(
+    config: &EngineConfig,
+    language: &str,
+    mode: &str,
+    output: Output,
+) -> Result<Box<dyn SpeechEngine>> {
     Ok(Box::new(
-        process::ProcessEngine::start(language, mode, output).await?,
+        process::ProcessEngine::start(config, language, mode, output).await?,
     ))
 }
