@@ -1,9 +1,9 @@
 //! Bounded recognition sessions. No transport, threads, UI, or input gestures.
-use crate::{
-    audio::{boundary, mean_square, RATE},
+use crate::qwen::{
+    audio::{RATE, boundary, mean_square},
     inference::{AsrInference, TranscribeResult, WindowCache},
 };
-use anyhow::{ensure, Result};
+use anyhow::{Result, ensure};
 
 pub trait Decoder {
     fn decode(
@@ -364,9 +364,11 @@ mod tests {
             .unwrap();
         assert!(u.last().unwrap().text.is_empty());
         assert!(model.audio.borrow().is_empty());
-        assert!(LiveSession::new("Japanese".into())
-            .feed(&model, &[0.1; 1000], true, &|| true)
-            .is_err());
+        assert!(
+            LiveSession::new("Japanese".into())
+                .feed(&model, &[0.1; 1000], true, &|| true)
+                .is_err()
+        );
     }
     #[test]
     fn latin_word_boundaries_are_preserved() {

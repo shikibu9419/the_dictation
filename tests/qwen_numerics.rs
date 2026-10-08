@@ -1,4 +1,4 @@
-use index_qwen::{
+use pebble_index::qwen::{
     backend::mlx::{signal, stream::init_mlx},
     mel::WhisperFeatureExtractor,
     tensor::{Device, Tensor},
@@ -15,8 +15,10 @@ fn frontend_and_scalar_semantics() {
     }
     let x = Tensor::from_slice_f32(&[-3.0, -1.0, 0.0, 1.0, 3.0]);
     assert_eq!(
-        x.to_dtype(index_qwen::tensor::DType::Float16).gelu().kind(),
-        index_qwen::tensor::DType::Float16
+        x.to_dtype(pebble_index::qwen::tensor::DType::Float16)
+            .gelu()
+            .kind(),
+        pebble_index::qwen::tensor::DType::Float16
     );
     let gelu = x.gelu().to_vec_f32();
     for (v, expected) in
@@ -32,14 +34,18 @@ fn frontend_and_scalar_semantics() {
         .to_vec_f32();
     assert_eq!(values, vec![1.0, 3.0, 2.0, 4.0]);
     // Invalid shapes/FFI failures must become catchable errors, not stdout or UB.
-    assert!(std::panic::catch_unwind(|| {
-        index_qwen::backend::mlx::array::MlxArray::from_f32(&[1.0], &[2]);
-    })
-    .is_err());
-    assert!(std::panic::catch_unwind(|| {
-        x.reshape(&[2, 2]);
-    })
-    .is_err());
+    assert!(
+        std::panic::catch_unwind(|| {
+            pebble_index::qwen::backend::mlx::array::MlxArray::from_f32(&[1.0], &[2]);
+        })
+        .is_err()
+    );
+    assert!(
+        std::panic::catch_unwind(|| {
+            x.reshape(&[2, 2]);
+        })
+        .is_err()
+    );
     packed_quantization();
     let extractor = WhisperFeatureExtractor::new(400, 160, 128, 16000, Device::gpu());
     compare_frontend_reference(&extractor);
@@ -54,7 +60,7 @@ fn frontend_and_scalar_semantics() {
 
 fn compare_frontend_reference(extractor: &WhisperFeatureExtractor) {
     let reference: serde_json::Value =
-        serde_json::from_str(include_str!("data/mel-reference.json")).unwrap();
+        serde_json::from_str(include_str!("data/qwen-mel-reference.json")).unwrap();
     let pcm: Vec<f32> = (0..16123)
         .map(|i| {
             let phase = 2.0 * std::f64::consts::PI * i as f64 / 16000.0;
@@ -76,7 +82,7 @@ fn compare_frontend_reference(extractor: &WhisperFeatureExtractor) {
     }
 }
 fn packed_quantization() {
-    use index_qwen::{
+    use pebble_index::qwen::{
         backend::mlx::{array::MlxArray, ffi::mlx_dtype},
         layers::Linear,
     };

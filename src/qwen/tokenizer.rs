@@ -17,10 +17,10 @@ impl AsrTokenizer {
         }
 
         use tokenizers::{
+            AddedToken, SplitDelimiterBehavior,
             decoders::byte_level::ByteLevel as Decoder,
             models::bpe::BPE,
             pre_tokenizers::{byte_level::ByteLevel, sequence::Sequence, split::Split},
-            AddedToken, SplitDelimiterBehavior,
         };
         let model = BPE::from_file(
             model_dir

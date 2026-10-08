@@ -47,20 +47,20 @@ unsafe fn invoke(
     // Never unwind through C++; propagate failure to the checked closure call.
     std::panic::catch_unwind(|| {
         let mut owned = MlxArray::empty();
-        let status = ffi::mlx_array_set(&mut owned.ptr, input);
+        let status = unsafe { ffi::mlx_array_set(&mut owned.ptr, input) };
         if status != 0 {
             return status;
         }
         let out = f(&owned);
-        ffi::mlx_array_set(res, out.ptr)
+        unsafe { ffi::mlx_array_set(res, out.ptr) }
     })
     .unwrap_or(1)
 }
 unsafe extern "C" fn gelu_callback(res: *mut ffi::mlx_array, a: ffi::mlx_array) -> i32 {
-    invoke(res, a, ops::gelu_uncompiled)
+    unsafe { invoke(res, a, ops::gelu_uncompiled) }
 }
 unsafe extern "C" fn silu_callback(res: *mut ffi::mlx_array, a: ffi::mlx_array) -> i32 {
-    invoke(res, a, ops::silu_uncompiled)
+    unsafe { invoke(res, a, ops::silu_uncompiled) }
 }
 thread_local! {
     static GELU: Unary = Unary::new(gelu_callback);

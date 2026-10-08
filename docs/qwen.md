@@ -1,7 +1,7 @@
 # Native Qwen inference
 
 Rust library for Qwen3-ASR 1.7B on Apple Silicon, using the MLX C API and Metal.
-This crate implements the inference core and a resident JSONL worker, `QwenNative`.
+The application package implements the inference core and a resident JSONL worker, `QwenNative`.
 The application invokes this worker directly. `setup-qwen` verifies the pinned model;
 `build-app.sh` bundles the executable and `mlx.metallib`. The parent grants compute
 access to live first, suspending and resuming batch without discarding its state.
@@ -14,11 +14,12 @@ is used by the Rust inference library. Model files are not in the repository.
 ## Build and numerical tests
 
 Requires Apple Silicon macOS, Rust, CMake, Xcode and its Metal toolchain.
-From this directory:
+From `desktop/rust/` (the single Cargo package):
 
 ```sh
-git submodule update --init
-cargo test --release
+git submodule update --init -- vendor/mlx-c
+cargo test --release --lib qwen::
+cargo test --release --test qwen_numerics --test qwen_worker_runtime
 cargo clippy --release --all-targets -- -D warnings
 ```
 
@@ -36,11 +37,11 @@ Reuse the existing model without changing or deleting the Python environment:
 ```sh
 export INDEX_QWEN_MODEL="$HOME/Library/Application Support/Index Voice/qwen-mlx/model"
 export INDEX_QWEN_FIXTURES="$(mktemp -d)"
-sh examples/make-fixtures.sh "$INDEX_QWEN_FIXTURES"
+sh examples/qwen_make-fixtures.sh "$INDEX_QWEN_FIXTURES"
 cargo test --release --lib short_tail -- --ignored --nocapture
-cargo test --release --test runtime -- --ignored --nocapture
-cargo test --release --test worker_runtime -- --ignored --nocapture --test-threads=1
-cargo run --release --example evaluate -- "$INDEX_QWEN_MODEL" \
+cargo test --release --test qwen_runtime -- --ignored --nocapture
+cargo test --release --test qwen_worker_runtime -- --ignored --nocapture --test-threads=1
+cargo run --release --example qwen_evaluate -- "$INDEX_QWEN_MODEL" \
   "$INDEX_QWEN_FIXTURES/short.wav" "$INDEX_QWEN_FIXTURES/long.wav" \
   "$INDEX_QWEN_FIXTURES/short.wav"
 ```
@@ -55,11 +56,13 @@ new recordings, or language changes. It reuses complete 800-frame encoder blocks
 and the decoder KV prefix, invalidating when log-mel normalization changes. Audio
 input is mono float32 at 16 kHz; the worker resamples incoming PCM with continuous phase.
 
-`examples/reference-python.py` is an optional **development comparison** against
+`examples/qwen_reference-python.py` is an optional **development comparison** against
 `mlx-qwen3-asr 0.4.4`; the Rust crate does not invoke it. Benchmarks and limitations:
-[Qwen native evaluation](../../docs/qwen-native-evaluation.md).
+[Qwen native evaluation](qwen-native-evaluation.md).
 
-See `NOTICE`, `LICENSE`, `MLX-LICENSE`, and `vendor/mlx-c/LICENSE` for attribution.
+Implementation: `src/qwen/`, worker entry point: `src/bin/qwen_native.rs`.
+All binaries, tests and examples use the root `Cargo.toml` and `Cargo.lock`.
+See `licenses/qwen/{NOTICE,LICENSE,MLX-LICENSE}` and `vendor/mlx-c/LICENSE` for attribution.
 
 ## Worker protocol
 

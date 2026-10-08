@@ -6,5 +6,5 @@ fn main() -> Result<()> {
         .context("usage: QwenNative MODEL_DIRECTORY LANGUAGE live|batch")?;
     let language = args.get(2).context("Missing language")?;
     let mode = args.get(3).context("Missing live|batch mode")?;
-    index_qwen::worker::run(std::path::Path::new(model), language, mode)
+    pebble_index::qwen::worker::run(std::path::Path::new(model), language, mode)
 }

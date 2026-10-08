@@ -293,7 +293,7 @@ Candle版はencoderの完了窓を再利用するが、`audio_accum` が増え�
 
 ### Rust＋MLXで実装する範囲
 
-推論部分を `native/qwen-rs/` の独立crateとして持ち、`QwenNative` バイナリを作る案。Rustのワーカー内でライブラリを直接呼び出す。BLE・状態遷移を持つプロセスとは分け、GPUIへ推論を組み込まない。
+推論部分は `src/qwen/` に置き、ルートのCargoパッケージの追加binとして `src/bin/qwen_native.rs` から `QwenNative` を作る。別Cargoプロジェクトは作らない。Rustのワーカー内でライブラリを直接呼び出す。BLE・状態遷移を持つプロセスとは分け、GPUIへ推論を組み込まない。
 
 ```mermaid
 flowchart LR

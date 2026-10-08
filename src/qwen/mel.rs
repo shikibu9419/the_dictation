@@ -1,5 +1,5 @@
 // Derived from second-state/qwen3_asr_rs; Apache-2.0. See NOTICE.
-use crate::tensor::{DType, Device, Tensor};
+use crate::qwen::tensor::{DType, Device, Tensor};
 use anyhow::Result;
 
 /// Whisper-style mel spectrogram feature extractor.

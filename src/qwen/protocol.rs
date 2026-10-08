@@ -1,8 +1,8 @@
 //! Versioned JSONL control plane. It never executes model or GPU operations.
-use anyhow::{ensure, Context, Result};
-use base64::{engine::general_purpose::STANDARD, Engine};
+use anyhow::{Context, Result, ensure};
+use base64::{Engine, engine::general_purpose::STANDARD};
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::{
     collections::VecDeque,
     io::{BufRead, Read, Write},
@@ -153,15 +153,15 @@ impl Input {
         if s.closed {
             return Ok(());
         }
-        if !matches!(wire.command, Command::Permit { .. }) {
-            if let Some(tag) = tag {
-                ensure!(
-                    !s.active || s.tag == tag,
-                    "Session changed without finish/cancel"
-                );
-                if !s.active {
-                    s.tag = tag;
-                }
+        if !matches!(wire.command, Command::Permit { .. })
+            && let Some(tag) = tag
+        {
+            ensure!(
+                !s.active || s.tag == tag,
+                "Session changed without finish/cancel"
+            );
+            if !s.active {
+                s.tag = tag;
             }
         }
         match wire.command {
@@ -378,9 +378,10 @@ mod tests {
         assert_eq!(work.audio.len(), 2);
         command(&i, json!({"type":"cancel","session_id":7,"generation":1})).unwrap();
         assert!(!i.current(work.epoch));
-        assert!(!i
-            .publish(work.epoch, json!({"type":"partial","text":"stale"}))
-            .unwrap());
+        assert!(
+            !i.publish(work.epoch, json!({"type":"partial","text":"stale"}))
+                .unwrap()
+        );
         command(
             &i,
             json!({"type":"audio","pcm":"AAA=","sample_rate":9997,"session_id":8,"generation":2}),

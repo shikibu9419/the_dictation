@@ -13,4 +13,4 @@ the parent mobileapp repository or any other third-party work.
 
 The native Qwen worker includes code derived from second-state/qwen3_asr_rs
 (Apache-2.0) and links MLX and mlx-c (MIT). Their notices and licenses are
-in native/qwen-rs/ and in the app bundle's Resources/qwen/ directory.
+in licenses/qwen/ (and vendor/mlx-c/LICENSE) and in the app bundle's Resources/qwen/ directory.

@@ -2,7 +2,7 @@
 
 ## 今回の範囲と判断
 
-`native/qwen-rs/` のRust＋MLX推論コアを実装し、現在のPython実装と同じモデル・同じPCMで比較した。
+`src/qwen/` のRust＋MLX推論コアを実装し、現在のPython実装と同じモデル・同じPCMで比較した。
 **Rust＋MLXで移行を続ける。** 日本語出力の一致と計算済みprefixの再利用を確認でき、通常の短音声の時間も同程度だったため。
 ネイティブ化そのものによる高速化は確認できていない。37.86秒の入力ではPythonより約9%遅い。
 
@@ -62,13 +62,14 @@ BLE・状態機械の変更も別段階で実装する。現在のソースは�
 
 ## 検証コマンド
 
-`native/qwen-rs/` で実行する。fixture生成やモデルパスの設定は同ディレクトリのREADMEを参照。
+`desktop/rust/` で実行する。fixture生成やモデルパスの設定は [Qwen実装](qwen.md) を参照。
 
 ```sh
-cargo test --release
+cargo test --release --lib qwen::
+cargo test --release --test qwen_numerics --test qwen_worker_runtime
 cargo clippy --release --all-targets -- -D warnings
 cargo test --release --lib short_tail -- --ignored --nocapture
-cargo test --release --test runtime -- --ignored --nocapture
+cargo test --release --test qwen_runtime -- --ignored --nocapture
 ```
 
 通常テストは数値処理・量子化・異常系を確認。モデルを使うignoredテストはJapanese tokenizer、
@@ -100,7 +101,7 @@ cache reset、開始前と認識途中のcancel、その後の正常な再認識
 追加テストはpaused batchへの全PCM受領、cancelによる旧結果破棄、resume後の全文認識、
 無音の空結果、連続録音、EOF正常終了、任意のPCMパケット境界でのリサンプル位相保持、
 長い無音末尾で認識済み本文を消さないこと、全区間の連続性を確認する。
-実行コマンド: `cargo test --release --test worker_runtime -- --ignored --nocapture --test-threads=1`。
+実行コマンド: `cargo test --release --test qwen_worker_runtime -- --ignored --nocapture --test-threads=1`。
 
 ## アプリ接続と配布の確認
 
@@ -145,3 +146,35 @@ liveのMLX peak memoryは2,268,914,354 bytes。両ワーカー合計RSSではな
 
 - 認識ワーカーの異常時に、親が保持するPCMを使って対象ワーカーだけを再起動・再送する。
 - BLEの音声保持と状態管理の変更を接続し、入力から認識までを別途確認する。
+
+
+## ルートCargoへの統合（2026-10-09）
+
+ユーザー指定に合わせ、推論実装を `src/qwen/`、workerの入口を
+`src/bin/qwen_native.rs` へ移動した。Cargoパッケージとlockfileはルートの1組に統一。
+C/C++依存は固定revisionの `vendor/mlx-c`、ライセンスは `licenses/qwen/` に置く。
+プロセス分離・モデル・PCM/JSONLプロトコル・推論方式は維持した。
+
+- Qwenのunit 14件、数値1件、ルートで生成したworker/Metalリソースの配置1件が通過。
+- `cargo clippy --release --all-targets -- -D warnings` が通過。
+- 画面なしのCLI・外部入力adapter・表示モデルのテストも実行した。
+- ルートの `build-app.sh` で一時ディレクトリへappを生成し、同梱・署名を確認。
+  `codesign --verify --deep --strict` は成功。QwenNativeの動的リンク先はmacOSのシステムライブラリだけ。
+- 同梱workerを親adapterから起動し、セットアップ再利用・連続認識・cancel・EOF、
+  liveが計算中のbatchを中断して同じ録音へ復帰する実モデルテスト2件が通過。
+- worker単体のbatch/cancel/EOFの実モデルテスト2件と、75.712秒のpaced liveが通過。
+  ユーザーのアプリ起動・BLE・マイク・画面表示・音声再生は行っていない。
+
+| 75.712秒入力 | コンパイルと同時 | 当方のビルド終了後 |
+| --- | ---: | ---: |
+| 初回partial | 1.425秒 | 1.255秒 |
+| 前半の認識待ち中央値 | 1.0秒 | 0.4秒 |
+| 後半の認識待ち中央値 | 1.0秒 | 1.2秒 |
+| 認識待ち最大 | 7.8秒 | 4.2秒 |
+| 開始からfinal | 77.144秒 | 76.840秒 |
+
+ビルド終了後もユーザーの他作業は継続している。以前の最大2.2秒より大きく、
+各1回の結果から配置変更の影響、温度、他の負荷を切り分けることはできない。
+入力全体の消費・全文の先頭と末尾・窓とメモリの上限は確認したが、
+**遅延が従来と同じ、または短縮したという証拠にはしない。**
+生データは [Cargo統合後の測定値](qwen-package-integration-benchmark.json) に保存。

@@ -55,6 +55,14 @@ pub fn executable() -> Result<PathBuf> {
     }
     let exe = std::env::current_exe()?;
     let mut candidates = vec![exe.with_file_name("QwenNative")];
+    // Cargo integration tests live in <profile>/deps, including with a custom target directory.
+    if exe
+        .parent()
+        .is_some_and(|p| p.file_name().is_some_and(|n| n == "deps"))
+        && let Some(profile) = exe.parent().and_then(Path::parent)
+    {
+        candidates.push(profile.join("QwenNative"));
+    }
     if let Some(contents) = exe.parent().and_then(Path::parent) {
         candidates.push(contents.join("Helpers/QwenNative"));
     }
@@ -63,12 +71,10 @@ pub fn executable() -> Result<PathBuf> {
         .ancestors()
         .any(|p| p.extension().is_some_and(|e| e == "app"))
     {
-        candidates.push(
-            Path::new(env!("CARGO_MANIFEST_DIR")).join("native/qwen-rs/target/release/QwenNative"),
-        );
+        candidates.push(Path::new(env!("CARGO_MANIFEST_DIR")).join("target/release/QwenNative"));
     }
     candidates.into_iter().find(|p| usable_binary(p)).context(
-        "QwenNative or mlx.metallib missing; build native/qwen-rs with cargo build --release, or reinstall the app",
+        "QwenNative or mlx.metallib missing; run cargo build --release --bins from desktop/rust, or reinstall the app",
     )
 }
 

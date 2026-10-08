@@ -15,9 +15,9 @@ pub enum DType {
     Bool,
 }
 
-impl From<DType> for crate::backend::mlx::ffi::mlx_dtype {
+impl From<DType> for crate::qwen::backend::mlx::ffi::mlx_dtype {
     fn from(dt: DType) -> Self {
-        use crate::backend::mlx::ffi::mlx_dtype::*;
+        use crate::qwen::backend::mlx::ffi::mlx_dtype::*;
         match dt {
             DType::Float32 => MLX_FLOAT32,
             DType::Float16 => MLX_FLOAT16,
@@ -29,9 +29,9 @@ impl From<DType> for crate::backend::mlx::ffi::mlx_dtype {
     }
 }
 
-impl From<crate::backend::mlx::ffi::mlx_dtype> for DType {
-    fn from(dt: crate::backend::mlx::ffi::mlx_dtype) -> Self {
-        use crate::backend::mlx::ffi::mlx_dtype::*;
+impl From<crate::qwen::backend::mlx::ffi::mlx_dtype> for DType {
+    fn from(dt: crate::qwen::backend::mlx::ffi::mlx_dtype) -> Self {
+        use crate::qwen::backend::mlx::ffi::mlx_dtype::*;
         match dt {
             MLX_FLOAT32 | MLX_FLOAT64 => DType::Float32,
             MLX_FLOAT16 => DType::Float16,
@@ -66,7 +66,7 @@ impl Device {
 
 #[derive(Debug)]
 pub struct Tensor {
-    pub(crate) inner: crate::backend::mlx::array::MlxArray,
+    pub(crate) inner: crate::qwen::backend::mlx::array::MlxArray,
 }
 
 impl Clone for Tensor {
@@ -79,7 +79,7 @@ impl Clone for Tensor {
 
 #[allow(dead_code)]
 impl Tensor {
-    pub fn from_mlx(a: crate::backend::mlx::array::MlxArray) -> Self {
+    pub fn from_mlx(a: crate::qwen::backend::mlx::array::MlxArray) -> Self {
         Tensor { inner: a }
     }
 
@@ -87,17 +87,21 @@ impl Tensor {
 
     pub fn from_slice_f32(data: &[f32]) -> Self {
         let shape = [data.len() as i32];
-        Tensor::from_mlx(crate::backend::mlx::array::MlxArray::from_f32(data, &shape))
+        Tensor::from_mlx(crate::qwen::backend::mlx::array::MlxArray::from_f32(
+            data, &shape,
+        ))
     }
 
     pub fn from_slice_i64(data: &[i64]) -> Self {
         let shape = [data.len() as i32];
-        Tensor::from_mlx(crate::backend::mlx::array::MlxArray::from_i64(data, &shape))
+        Tensor::from_mlx(crate::qwen::backend::mlx::array::MlxArray::from_i64(
+            data, &shape,
+        ))
     }
 
     pub fn zeros(shape: &[i64], dtype: DType, _device: Device) -> Self {
         let shape_i32: Vec<i32> = shape.iter().map(|&s| s as i32).collect();
-        Tensor::from_mlx(crate::backend::mlx::array::MlxArray::zeros(
+        Tensor::from_mlx(crate::qwen::backend::mlx::array::MlxArray::zeros(
             &shape_i32,
             dtype.into(),
         ))
@@ -105,7 +109,7 @@ impl Tensor {
 
     pub fn ones(shape: &[i64], dtype: DType, _device: Device) -> Self {
         let shape_i32: Vec<i32> = shape.iter().map(|&s| s as i32).collect();
-        Tensor::from_mlx(crate::backend::mlx::array::MlxArray::ones(
+        Tensor::from_mlx(crate::qwen::backend::mlx::array::MlxArray::ones(
             &shape_i32,
             dtype.into(),
         ))
@@ -113,8 +117,8 @@ impl Tensor {
 
     pub fn full(shape: &[i64], val: f64, dtype: DType, _device: Device) -> Self {
         let shape_i32: Vec<i32> = shape.iter().map(|&s| s as i32).collect();
-        let val_arr = crate::backend::mlx::array::MlxArray::scalar_f32(val as f32);
-        Tensor::from_mlx(crate::backend::mlx::array::MlxArray::full(
+        let val_arr = crate::qwen::backend::mlx::array::MlxArray::scalar_f32(val as f32);
+        Tensor::from_mlx(crate::qwen::backend::mlx::array::MlxArray::full(
             &shape_i32,
             &val_arr,
             dtype.into(),
@@ -122,29 +126,31 @@ impl Tensor {
     }
 
     pub fn arange(start: i64, end: i64, _device: Device) -> Self {
-        Tensor::from_mlx(crate::backend::mlx::array::MlxArray::arange(
+        Tensor::from_mlx(crate::qwen::backend::mlx::array::MlxArray::arange(
             start as f64,
             end as f64,
             1.0,
-            crate::backend::mlx::ffi::mlx_dtype::MLX_INT64,
+            crate::qwen::backend::mlx::ffi::mlx_dtype::MLX_INT64,
         ))
     }
 
     pub fn cat(tensors: &[Tensor], dim: i64) -> Self {
-        let refs: Vec<&crate::backend::mlx::array::MlxArray> =
+        let refs: Vec<&crate::qwen::backend::mlx::array::MlxArray> =
             tensors.iter().map(|t| &t.inner).collect();
-        Tensor::from_mlx(crate::backend::mlx::ops::concatenate(&refs, dim as i32))
+        Tensor::from_mlx(crate::qwen::backend::mlx::ops::concatenate(
+            &refs, dim as i32,
+        ))
     }
 
     pub fn stack(tensors: &[Tensor], dim: i64) -> Self {
-        let refs: Vec<&crate::backend::mlx::array::MlxArray> =
+        let refs: Vec<&crate::qwen::backend::mlx::array::MlxArray> =
             tensors.iter().map(|t| &t.inner).collect();
-        Tensor::from_mlx(crate::backend::mlx::ops::stack(&refs, dim as i32))
+        Tensor::from_mlx(crate::qwen::backend::mlx::ops::stack(&refs, dim as i32))
     }
 
     pub fn embedding(weight: &Tensor, indices: &Tensor) -> Self {
         // Embedding is just take(weight, indices, axis=0)
-        Tensor::from_mlx(crate::backend::mlx::ops::take(
+        Tensor::from_mlx(crate::qwen::backend::mlx::ops::take(
             &weight.inner,
             &indices.inner,
             0,
@@ -152,7 +158,7 @@ impl Tensor {
     }
 
     pub fn hann_window(size: i64, _device: Device) -> Self {
-        Tensor::from_mlx(crate::backend::mlx::signal::hann_window(size as i32))
+        Tensor::from_mlx(crate::qwen::backend::mlx::signal::hann_window(size as i32))
     }
 
     // -- Shape --
@@ -177,7 +183,10 @@ impl Tensor {
 
     pub fn view(&self, shape: &[i64]) -> Self {
         let shape_i32: Vec<i32> = shape.iter().map(|&s| s as i32).collect();
-        Tensor::from_mlx(crate::backend::mlx::ops::reshape(&self.inner, &shape_i32))
+        Tensor::from_mlx(crate::qwen::backend::mlx::ops::reshape(
+            &self.inner,
+            &shape_i32,
+        ))
     }
 
     pub fn reshape(&self, shape: &[i64]) -> Self {
@@ -193,7 +202,7 @@ impl Tensor {
         let strides = vec![1i32; ndim as usize];
         starts[dim as usize] = start as i32;
         stops[dim as usize] = (start + len) as i32;
-        Tensor::from_mlx(crate::backend::mlx::ops::slice(
+        Tensor::from_mlx(crate::qwen::backend::mlx::ops::slice(
             &self.inner,
             &starts,
             &stops,
@@ -207,7 +216,10 @@ impl Tensor {
         } else {
             dim
         } as i32;
-        Tensor::from_mlx(crate::backend::mlx::ops::expand_dims(&self.inner, &[dim]))
+        Tensor::from_mlx(crate::qwen::backend::mlx::ops::expand_dims(
+            &self.inner,
+            &[dim],
+        ))
     }
 
     pub fn squeeze_dim(&self, dim: i64) -> Self {
@@ -216,19 +228,26 @@ impl Tensor {
         } else {
             dim
         } as i32;
-        Tensor::from_mlx(crate::backend::mlx::ops::squeeze(&self.inner, &[dim]))
+        Tensor::from_mlx(crate::qwen::backend::mlx::ops::squeeze(&self.inner, &[dim]))
     }
 
     pub fn transpose(&self, dim0: i64, dim1: i64) -> Self {
         let ndim = self.inner.ndim();
         let dim0 = if dim0 < 0 { ndim as i64 + dim0 } else { dim0 } as i32;
         let dim1 = if dim1 < 0 { ndim as i64 + dim1 } else { dim1 } as i32;
-        Tensor::from_mlx(crate::backend::mlx::ops::swapaxes(&self.inner, dim0, dim1))
+        Tensor::from_mlx(crate::qwen::backend::mlx::ops::swapaxes(
+            &self.inner,
+            dim0,
+            dim1,
+        ))
     }
 
     pub fn permute(&self, dims: &[i64]) -> Self {
         let dims_i32: Vec<i32> = dims.iter().map(|&d| d as i32).collect();
-        Tensor::from_mlx(crate::backend::mlx::ops::transpose(&self.inner, &dims_i32))
+        Tensor::from_mlx(crate::qwen::backend::mlx::ops::transpose(
+            &self.inner,
+            &dims_i32,
+        ))
     }
 
     pub fn tr(&self) -> Self {
@@ -240,42 +259,51 @@ impl Tensor {
     }
 
     pub fn select(&self, dim: i64, index: i64) -> Self {
-        let idx = crate::backend::mlx::array::MlxArray::from_i32(&[index as i32], &[1]);
+        let idx = crate::qwen::backend::mlx::array::MlxArray::from_i32(&[index as i32], &[1]);
         let dim = if dim < 0 {
             self.inner.ndim() as i64 + dim
         } else {
             dim
         } as i32;
-        let taken = crate::backend::mlx::ops::take(&self.inner, &idx, dim);
-        Tensor::from_mlx(crate::backend::mlx::ops::squeeze(&taken, &[dim]))
+        let taken = crate::qwen::backend::mlx::ops::take(&self.inner, &idx, dim);
+        Tensor::from_mlx(crate::qwen::backend::mlx::ops::squeeze(&taken, &[dim]))
     }
 
     // -- Arithmetic --
 
     pub fn matmul(&self, other: &Tensor) -> Self {
-        Tensor::from_mlx(crate::backend::mlx::ops::matmul(&self.inner, &other.inner))
+        Tensor::from_mlx(crate::qwen::backend::mlx::ops::matmul(
+            &self.inner,
+            &other.inner,
+        ))
     }
 
     pub fn pow_scalar(&self, exp: f64) -> Self {
-        let exp_arr =
-            crate::backend::mlx::array::MlxArray::scalar_f32(exp as f32).astype(self.inner.dtype());
-        Tensor::from_mlx(crate::backend::mlx::ops::power(&self.inner, &exp_arr))
+        let exp_arr = crate::qwen::backend::mlx::array::MlxArray::scalar_f32(exp as f32)
+            .astype(self.inner.dtype());
+        Tensor::from_mlx(crate::qwen::backend::mlx::ops::power(&self.inner, &exp_arr))
     }
 
     pub fn clamp_min(&self, min: f64) -> Self {
-        let min_arr =
-            crate::backend::mlx::array::MlxArray::scalar_f32(min as f32).astype(self.inner.dtype());
-        Tensor::from_mlx(crate::backend::mlx::ops::maximum(&self.inner, &min_arr))
+        let min_arr = crate::qwen::backend::mlx::array::MlxArray::scalar_f32(min as f32)
+            .astype(self.inner.dtype());
+        Tensor::from_mlx(crate::qwen::backend::mlx::ops::maximum(
+            &self.inner,
+            &min_arr,
+        ))
     }
 
     pub fn maximum(&self, other: &Tensor) -> Self {
-        Tensor::from_mlx(crate::backend::mlx::ops::maximum(&self.inner, &other.inner))
+        Tensor::from_mlx(crate::qwen::backend::mlx::ops::maximum(
+            &self.inner,
+            &other.inner,
+        ))
     }
 
     // -- Math --
 
     pub fn abs(&self) -> Self {
-        Tensor::from_mlx(crate::backend::mlx::ops::abs(&self.inner))
+        Tensor::from_mlx(crate::qwen::backend::mlx::ops::abs(&self.inner))
     }
 
     pub fn square(&self) -> Self {
@@ -283,31 +311,31 @@ impl Tensor {
     }
 
     pub fn sqrt(&self) -> Self {
-        Tensor::from_mlx(crate::backend::mlx::ops::sqrt(&self.inner))
+        Tensor::from_mlx(crate::qwen::backend::mlx::ops::sqrt(&self.inner))
     }
 
     pub fn rsqrt(&self) -> Self {
-        Tensor::from_mlx(crate::backend::mlx::ops::rsqrt(&self.inner))
+        Tensor::from_mlx(crate::qwen::backend::mlx::ops::rsqrt(&self.inner))
     }
 
     pub fn log10(&self) -> Self {
         // log10(x) = ln(x) / ln(10)
-        let ln_x = crate::backend::mlx::ops::log(&self.inner);
-        let ln10 = crate::backend::mlx::array::MlxArray::scalar_f32(std::f32::consts::LN_10)
+        let ln_x = crate::qwen::backend::mlx::ops::log(&self.inner);
+        let ln10 = crate::qwen::backend::mlx::array::MlxArray::scalar_f32(std::f32::consts::LN_10)
             .astype(self.inner.dtype());
-        Tensor::from_mlx(crate::backend::mlx::ops::divide(&ln_x, &ln10))
+        Tensor::from_mlx(crate::qwen::backend::mlx::ops::divide(&ln_x, &ln10))
     }
 
     pub fn sin(&self) -> Self {
-        Tensor::from_mlx(crate::backend::mlx::ops::sin(&self.inner))
+        Tensor::from_mlx(crate::qwen::backend::mlx::ops::sin(&self.inner))
     }
 
     pub fn cos(&self) -> Self {
-        Tensor::from_mlx(crate::backend::mlx::ops::cos(&self.inner))
+        Tensor::from_mlx(crate::qwen::backend::mlx::ops::cos(&self.inner))
     }
 
     pub fn exp(&self) -> Self {
-        Tensor::from_mlx(crate::backend::mlx::ops::exp(&self.inner))
+        Tensor::from_mlx(crate::qwen::backend::mlx::ops::exp(&self.inner))
     }
 
     // -- Activations --
@@ -318,15 +346,15 @@ impl Tensor {
         } else {
             dim
         } as i32;
-        Tensor::from_mlx(crate::backend::mlx::ops::softmax(&self.inner, &[dim]))
+        Tensor::from_mlx(crate::qwen::backend::mlx::ops::softmax(&self.inner, &[dim]))
     }
 
     pub fn gelu(&self) -> Self {
-        Tensor::from_mlx(crate::backend::mlx::ops::gelu(&self.inner))
+        Tensor::from_mlx(crate::qwen::backend::mlx::ops::gelu(&self.inner))
     }
 
     pub fn silu(&self) -> Self {
-        Tensor::from_mlx(crate::backend::mlx::ops::silu(&self.inner))
+        Tensor::from_mlx(crate::qwen::backend::mlx::ops::silu(&self.inner))
     }
 
     // -- Reduction --
@@ -342,7 +370,7 @@ impl Tensor {
                 }
             })
             .collect();
-        Tensor::from_mlx(crate::backend::mlx::ops::mean(
+        Tensor::from_mlx(crate::qwen::backend::mlx::ops::mean(
             &self.inner,
             &dims_i32,
             keepdim,
@@ -350,7 +378,7 @@ impl Tensor {
     }
 
     pub fn max(&self) -> Self {
-        Tensor::from_mlx(crate::backend::mlx::ops::max_all(&self.inner, false))
+        Tensor::from_mlx(crate::qwen::backend::mlx::ops::max_all(&self.inner, false))
     }
 
     // -- Indexing --
@@ -361,17 +389,24 @@ impl Tensor {
         } else {
             dim
         } as i32;
-        Tensor::from_mlx(crate::backend::mlx::ops::argmax(&self.inner, dim, keepdim))
+        Tensor::from_mlx(crate::qwen::backend::mlx::ops::argmax(
+            &self.inner,
+            dim,
+            keepdim,
+        ))
     }
 
     pub fn triu(&self, diagonal: i64) -> Self {
-        Tensor::from_mlx(crate::backend::mlx::ops::triu(&self.inner, diagonal as i32))
+        Tensor::from_mlx(crate::qwen::backend::mlx::ops::triu(
+            &self.inner,
+            diagonal as i32,
+        ))
     }
 
     // -- Normalization --
 
     pub fn rms_norm(&self, weight: &Tensor, eps: f64) -> Self {
-        Tensor::from_mlx(crate::backend::mlx::ops::fast_rms_norm(
+        Tensor::from_mlx(crate::qwen::backend::mlx::ops::fast_rms_norm(
             &self.inner,
             &weight.inner,
             eps as f32,
@@ -386,7 +421,7 @@ impl Tensor {
         eps: f64,
     ) -> Self {
         if let Some(w) = weight {
-            Tensor::from_mlx(crate::backend::mlx::ops::fast_layer_norm(
+            Tensor::from_mlx(crate::qwen::backend::mlx::ops::fast_layer_norm(
                 &self.inner,
                 &w.inner,
                 bias.map(|b| &b.inner),
@@ -428,7 +463,7 @@ impl Tensor {
         scale: f64,
         mask: Option<&Tensor>,
     ) -> Tensor {
-        Tensor::from_mlx(crate::backend::mlx::ops::fast_sdpa(
+        Tensor::from_mlx(crate::qwen::backend::mlx::ops::fast_sdpa(
             &q.inner,
             &k.inner,
             &v.inner,
@@ -453,7 +488,7 @@ impl Tensor {
         let input_t = self.permute(&[0, 2, 3, 1]); // [N, C, H, W] -> [N, H, W, C]
         let weight_t = weight.shallow_clone(); // [C_out, C_in, kH, kW] -> [C_out, kH, kW, C_in]
 
-        let result = crate::backend::mlx::ops::conv2d(
+        let result = crate::qwen::backend::mlx::ops::conv2d(
             &input_t.inner,
             &weight_t.inner,
             [stride[0] as i32, stride[1] as i32],
@@ -474,7 +509,7 @@ impl Tensor {
     // -- Signal --
 
     pub fn reflection_pad1d(&self, pad: &[i64]) -> Self {
-        Tensor::from_mlx(crate::backend::mlx::signal::reflection_pad1d(
+        Tensor::from_mlx(crate::qwen::backend::mlx::signal::reflection_pad1d(
             &self.inner,
             pad[0] as i32,
             pad[1] as i32,
@@ -484,13 +519,13 @@ impl Tensor {
     pub fn stft_magnitude(&self, n_fft: i64, hop_length: i64, window: &Tensor) -> Self {
         // stft_magnitude returns [n_frames, freq_bins].
         // Transpose to [freq_bins, n_frames] to match tch STFT output layout.
-        let mag = crate::backend::mlx::signal::stft_magnitude(
+        let mag = crate::qwen::backend::mlx::signal::stft_magnitude(
             &self.inner,
             n_fft as i32,
             hop_length as i32,
             &window.inner,
         );
-        Tensor::from_mlx(crate::backend::mlx::ops::swapaxes(&mag, 0, 1))
+        Tensor::from_mlx(crate::qwen::backend::mlx::ops::swapaxes(&mag, 0, 1))
     }
 
     // -- Type / Device --
@@ -529,7 +564,7 @@ impl Tensor {
         let starts: Vec<i32> = indices.iter().map(|&i| i as i32).collect();
         let stops: Vec<i32> = indices.iter().map(|&i| i as i32 + 1).collect();
         let strides: Vec<i32> = vec![1; indices.len()];
-        let sliced = crate::backend::mlx::ops::slice(&self.inner, &starts, &stops, &strides);
+        let sliced = crate::qwen::backend::mlx::ops::slice(&self.inner, &starts, &stops, &strides);
         sliced.item_i64()
     }
 
@@ -540,14 +575,14 @@ impl Tensor {
         let starts: Vec<i32> = indices.iter().map(|&i| i as i32).collect();
         let stops: Vec<i32> = indices.iter().map(|&i| i as i32 + 1).collect();
         let strides: Vec<i32> = vec![1; indices.len()];
-        let sliced = crate::backend::mlx::ops::slice(&self.inner, &starts, &stops, &strides);
+        let sliced = crate::qwen::backend::mlx::ops::slice(&self.inner, &starts, &stops, &strides);
         sliced.item_f32() as f64
     }
 
     pub fn to_vec_f32(&self) -> Vec<f32> {
         let f32_arr = self
             .inner
-            .astype(crate::backend::mlx::ffi::mlx_dtype::MLX_FLOAT32);
+            .astype(crate::qwen::backend::mlx::ffi::mlx_dtype::MLX_FLOAT32);
         f32_arr.to_vec_f32()
     }
 }
@@ -560,7 +595,7 @@ impl Tensor {
 impl std::ops::Add<&Tensor> for &Tensor {
     type Output = Tensor;
     fn add(self, rhs: &Tensor) -> Tensor {
-        Tensor::from_mlx(crate::backend::mlx::ops::add(&self.inner, &rhs.inner))
+        Tensor::from_mlx(crate::qwen::backend::mlx::ops::add(&self.inner, &rhs.inner))
     }
 }
 
@@ -590,9 +625,9 @@ impl std::ops::Add<f64> for &Tensor {
     type Output = Tensor;
     fn add(self, rhs: f64) -> Tensor {
         {
-            let scalar = crate::backend::mlx::array::MlxArray::scalar_f32(rhs as f32)
+            let scalar = crate::qwen::backend::mlx::array::MlxArray::scalar_f32(rhs as f32)
                 .astype(self.inner.dtype());
-            Tensor::from_mlx(crate::backend::mlx::ops::add(&self.inner, &scalar))
+            Tensor::from_mlx(crate::qwen::backend::mlx::ops::add(&self.inner, &scalar))
         }
     }
 }
@@ -608,7 +643,10 @@ impl std::ops::Add<f64> for Tensor {
 impl std::ops::Sub<&Tensor> for &Tensor {
     type Output = Tensor;
     fn sub(self, rhs: &Tensor) -> Tensor {
-        Tensor::from_mlx(crate::backend::mlx::ops::subtract(&self.inner, &rhs.inner))
+        Tensor::from_mlx(crate::qwen::backend::mlx::ops::subtract(
+            &self.inner,
+            &rhs.inner,
+        ))
     }
 }
 
@@ -637,9 +675,12 @@ impl std::ops::Sub<f64> for &Tensor {
     type Output = Tensor;
     fn sub(self, rhs: f64) -> Tensor {
         {
-            let scalar = crate::backend::mlx::array::MlxArray::scalar_f32(rhs as f32)
+            let scalar = crate::qwen::backend::mlx::array::MlxArray::scalar_f32(rhs as f32)
                 .astype(self.inner.dtype());
-            Tensor::from_mlx(crate::backend::mlx::ops::subtract(&self.inner, &scalar))
+            Tensor::from_mlx(crate::qwen::backend::mlx::ops::subtract(
+                &self.inner,
+                &scalar,
+            ))
         }
     }
 }
@@ -648,7 +689,10 @@ impl std::ops::Sub<f64> for &Tensor {
 impl std::ops::Mul<&Tensor> for &Tensor {
     type Output = Tensor;
     fn mul(self, rhs: &Tensor) -> Tensor {
-        Tensor::from_mlx(crate::backend::mlx::ops::multiply(&self.inner, &rhs.inner))
+        Tensor::from_mlx(crate::qwen::backend::mlx::ops::multiply(
+            &self.inner,
+            &rhs.inner,
+        ))
     }
 }
 
@@ -678,9 +722,12 @@ impl std::ops::Mul<f64> for &Tensor {
     type Output = Tensor;
     fn mul(self, rhs: f64) -> Tensor {
         {
-            let scalar = crate::backend::mlx::array::MlxArray::scalar_f32(rhs as f32)
+            let scalar = crate::qwen::backend::mlx::array::MlxArray::scalar_f32(rhs as f32)
                 .astype(self.inner.dtype());
-            Tensor::from_mlx(crate::backend::mlx::ops::multiply(&self.inner, &scalar))
+            Tensor::from_mlx(crate::qwen::backend::mlx::ops::multiply(
+                &self.inner,
+                &scalar,
+            ))
         }
     }
 }
@@ -696,7 +743,10 @@ impl std::ops::Mul<f64> for Tensor {
 impl std::ops::Div<&Tensor> for &Tensor {
     type Output = Tensor;
     fn div(self, rhs: &Tensor) -> Tensor {
-        Tensor::from_mlx(crate::backend::mlx::ops::divide(&self.inner, &rhs.inner))
+        Tensor::from_mlx(crate::qwen::backend::mlx::ops::divide(
+            &self.inner,
+            &rhs.inner,
+        ))
     }
 }
 
@@ -726,9 +776,9 @@ impl std::ops::Div<f64> for &Tensor {
     type Output = Tensor;
     fn div(self, rhs: f64) -> Tensor {
         {
-            let scalar = crate::backend::mlx::array::MlxArray::scalar_f32(rhs as f32)
+            let scalar = crate::qwen::backend::mlx::array::MlxArray::scalar_f32(rhs as f32)
                 .astype(self.inner.dtype());
-            Tensor::from_mlx(crate::backend::mlx::ops::divide(&self.inner, &scalar))
+            Tensor::from_mlx(crate::qwen::backend::mlx::ops::divide(&self.inner, &scalar))
         }
     }
 }
@@ -744,7 +794,7 @@ impl std::ops::Div<f64> for Tensor {
 impl std::ops::Neg for &Tensor {
     type Output = Tensor;
     fn neg(self) -> Tensor {
-        Tensor::from_mlx(crate::backend::mlx::ops::negative(&self.inner))
+        Tensor::from_mlx(crate::qwen::backend::mlx::ops::negative(&self.inner))
     }
 }
 

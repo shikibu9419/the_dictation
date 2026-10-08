@@ -1,6 +1,6 @@
 //! Headless fixed-model evaluation; emits JSON and never plays audio.
 use anyhow::{Context, Result};
-use index_qwen::{
+use pebble_index::qwen::{
     backend::mlx::stream::init_mlx, inference::AsrInference, mel::WhisperFeatureExtractor,
     tensor::Device,
 };

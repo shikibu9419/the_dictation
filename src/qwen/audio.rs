@@ -1,5 +1,5 @@
 //! PCM preprocessing independent of model inference and process I/O.
-use anyhow::{ensure, Result};
+use anyhow::{Result, ensure};
 pub const RATE: usize = 16_000;
 
 pub struct Resampler {

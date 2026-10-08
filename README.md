@@ -17,7 +17,7 @@ Index 01の音声をMacへBLE転送し、標準で **Apple SpeechAnalyzer / Spee
 
 初回はCargo依存関係とAppleの音声モデルの取得にインターネット接続が必要です。Apple APIを呼ぶSwiftヘルパーは初回実行時にビルドし、以降はキャッシュを使います。SwiftソースはRustバイナリへ埋め込まれるため、実行時にこのリポジトリのソースを探す必要はありません。
 
-On DeviceはApple Siliconを使用します。配布用appにはQwenNativeとMetalリソースを同梱し、設定画面の「モデルをダウンロード」でモデルを用意します。ソースからCLIを使う場合は、下記のQwenNativeビルドも行ってください。認識中に音声をサーバーへ送信することはありません。
+On DeviceはApple Siliconを使用します。配布用appにはQwenNativeとMetalリソースを同梱し、設定画面の「モデルをダウンロード」でモデルを用意します。ソースからビルドする場合も、ルートのCargoでCLI・GUI・QwenNativeをまとめて生成します。認識中に音声をサーバーへ送信することはありません。
 
 ## ビルド・起動
 
@@ -25,7 +25,8 @@ On DeviceはApple Siliconを使用します。配布用appにはQwenNativeとMet
 
 ```sh
 cd desktop/rust
-cargo build --release
+git submodule update --init -- vendor/mlx-c
+cargo build --release --locked --bins
 ./target/release/pebble-index pair
 ./target/release/pebble-index --log debug.log
 ```
@@ -71,7 +72,8 @@ cargo run --release -- --log debug.log
 cd desktop/rust
 # GPUIの初回ビルドでMetal Toolchainがないと言われた場合
 xcodebuild -downloadComponent MetalToolchain
-cargo build --release --bins
+git submodule update --init -- vendor/mlx-c
+cargo build --release --locked --bins
 ./target/release/pebble-index pair
 ./target/release/pebble-index gui --log debug.log
 ```
@@ -114,8 +116,8 @@ CLIでも同じ設定を使えます。設定ファイルは `~/.config/pebble-i
 
 ```sh
 # ソースからCLIを使う場合のみ。build-app.shでは自動実行します
-git submodule update --init -- native/qwen-rs/vendor/mlx-c
-cargo build --release --locked --manifest-path native/qwen-rs/Cargo.toml --target-dir native/qwen-rs/target
+git submodule update --init -- vendor/mlx-c
+cargo build --release --locked --bins
 cargo run --release -- setup-qwen
 cargo run --release -- settings --input microphone --speech on-device
 cargo run --release -- gui
@@ -257,7 +259,7 @@ INDEX_VOICE_INPUT_COMMAND=/absolute/path/to/input-adapter cargo run --release --
 
 ### 認識モデルを追加する
 
-Rust内で`SpeechEngine`を実装してファクトリーに登録するか、外部プロセスアダプターを指定します。SpeechAnalyzer、Qwen3-ASR MLX、従来CLI用Whisperのアダプターを実装済みです。Qwenは`native/qwen-rs/`の常駐Rustバイナリ、モデルのセットアップは`src/qwen_setup.rs`、モデル・実行ファイルの準備判定は`src/qwen_runtime.rs`に分離しています。
+Rust内で`SpeechEngine`を実装してファクトリーに登録するか、外部プロセスアダプターを指定します。SpeechAnalyzer、Qwen3-ASR MLX、従来CLI用Whisperのアダプターを実装済みです。Qwenの推論実装は`src/qwen/`、常駐ワーカーの入口は`src/bin/qwen_native.rs`です。CLI・GUIと共通のCargo.tomlでビルドします。モデルのセットアップは`src/qwen_setup.rs`、モデル・実行ファイルの準備判定は`src/qwen_runtime.rs`に分離しています。
 
 ```sh
 INDEX_VOICE_SPEECH_COMMAND=/absolute/path/to/speech-adapter cargo run --release -- gui
@@ -344,7 +346,7 @@ Macの実際のBLE探索でリングを検出し、30秒探索がIPCの待機期
 ### On Device（Qwen3-ASR MLX）の実行環境
 
 - モデル: [moona3k/mlx-qwen3-asr-1.7b-8bit](https://huggingface.co/moona3k/mlx-qwen3-asr-1.7b-8bit)（8bit、約2.2 GB）。日本語は`Japanese`を明示して認識します。
-- 実装: `native/qwen-rs/` のRust＋MLX C API。mlx-cとMLXのrevisionを固定しています。MLX C++とAppleのMetal等を使用し、Python・uv・PyTorchは実行依存に含めません。[出典とライセンス](native/qwen-rs/NOTICE)。
+- 実装: `src/qwen/` のRust＋MLX C API。mlx-cとMLXのrevisionを固定しています。MLX C++とAppleのMetal等を使用し、Python・uv・PyTorchは実行依存に含めません。[出典とライセンス](licenses/qwen/NOTICE)。
 - 保存先: `~/Library/Application Support/Index Voice/qwen-mlx/model/`。既存の検証済み重みを再利用します。旧`.venv`は参照せず、削除もしません。
 - `.app`には`QwenNative`、`mlx.metallib`、ライセンスを同梱します。実行時にリポジトリやコンパイラーは不要です。開発時は`INDEX_VOICE_QWEN_BINARY`で隣に`mlx.metallib`がある実行ファイルを指定できます。
 - 初回移行時も`setup-qwen`を実行してください。既存ファイルのSHA-256を確認し、`native-model.json`を原子的に更新します。準備判定ではモデルのrevision、各ファイルのサイズ・更新時刻、ネイティブ実行ファイルとMetalリソースを確認します。

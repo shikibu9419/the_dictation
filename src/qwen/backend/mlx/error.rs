@@ -1,7 +1,7 @@
 //! Capture MLX errors without its default handler writing to protocol stdout.
 use std::{
     cell::RefCell,
-    ffi::{c_char, c_void, CStr},
+    ffi::{CStr, c_char, c_void},
 };
 thread_local! { static LAST: RefCell<Option<String>> = const { RefCell::new(None) }; }
 unsafe extern "C" fn record(message: *const c_char, _: *mut c_void) {
@@ -10,7 +10,9 @@ unsafe extern "C" fn record(message: *const c_char, _: *mut c_void) {
         let text = if message.is_null() {
             "Unknown MLX error".to_owned()
         } else {
-            CStr::from_ptr(message).to_string_lossy().into_owned()
+            unsafe { CStr::from_ptr(message) }
+                .to_string_lossy()
+                .into_owned()
         };
         LAST.with(|last| *last.borrow_mut() = Some(text));
     });

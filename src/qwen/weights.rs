@@ -1,5 +1,5 @@
 // Derived from second-state/qwen3_asr_rs; Apache-2.0. See NOTICE.
-use crate::tensor::{Device, Tensor};
+use crate::qwen::tensor::{Device, Tensor};
 use anyhow::{Context, Result};
 use std::collections::HashMap;
 use std::path::Path;
@@ -61,12 +61,12 @@ fn load_sharded_safetensors(index_path: &Path, device: Device) -> Result<HashMap
 
 /// Load all tensors from a single safetensors file (MLX backend).
 pub fn load_safetensors(path: &Path, _device: Device) -> Result<HashMap<String, Tensor>> {
-    let map =
-        crate::backend::mlx::io::load_safetensors(path).map_err(|e| anyhow::anyhow!("{}", e))?;
+    let map = crate::qwen::backend::mlx::io::load_safetensors(path)
+        .map_err(|e| anyhow::anyhow!("{}", e))?;
     Ok(map
         .into_iter()
         .map(|(name, arr)| {
-            use crate::backend::mlx::ffi::mlx_dtype::*;
+            use crate::qwen::backend::mlx::ffi::mlx_dtype::*;
             let arr = match arr.dtype() {
                 MLX_FLOAT32 | MLX_BFLOAT16 => arr.astype(MLX_FLOAT16),
                 _ => arr,

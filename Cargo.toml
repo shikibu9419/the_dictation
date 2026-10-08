@@ -26,9 +26,12 @@ raw-window-handle = "0.6"
 futures = "0.3"
 log = "0.4"
 gpui-component = { version = "=0.5.1", default-features = false }
+tokenizers = { version = "0.21", default-features = false, features = ["onig"] }
+tracing = "0.1"
 whisper-rs = { version = "0.16", features = ["metal"] }
 
 [dev-dependencies]
+hound = "3.5"
 tower = { version = "0.5", features = ["util"] }
 
 [[bin]]
@@ -39,5 +42,10 @@ path = "src/main.rs"
 name = "index-voice"
 path = "src/overlay/main.rs"
 
+[[bin]]
+name = "QwenNative"
+path = "src/bin/qwen_native.rs"
+
 [build-dependencies]
+cmake = "0.1"
 cc = "1.5.1"

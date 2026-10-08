@@ -1,11 +1,11 @@
-use crate::{
-    audio::{Resampler, SpeechStart, RATE},
+use crate::qwen::{
+    audio::{RATE, Resampler, SpeechStart},
     inference::{AsrInference, TranscribeResult, WindowCache},
     protocol::{Input, Sink, VERSION},
     streaming::{BatchSession, Decoder, LiveSession},
     tensor::Device,
 };
-use anyhow::{ensure, Context, Result};
+use anyhow::{Context, Result, ensure};
 use serde_json::json;
 use std::{io::BufReader, path::Path, sync::Arc, time::Instant};
 
@@ -128,7 +128,7 @@ pub fn run(model_path: &Path, locale: &str, mode: &str) -> Result<()> {
     result
 }
 fn serve(path: &Path, language: &str, mode: &str, input: &Arc<Input>) -> Result<()> {
-    crate::backend::mlx::stream::init_mlx(true);
+    crate::qwen::backend::mlx::stream::init_mlx(true);
     input.sink.send(
         &json!({"type":"status","text":"Loading native Qwen3-ASR MLX","protocol_version":VERSION}),
     )?;
@@ -141,10 +141,9 @@ fn serve(path: &Path, language: &str, mode: &str, input: &Arc<Input>) -> Result<
     )?;
     if let Err(e) =
         model.transcribe_samples(&vec![0.0; RATE], Some(language), &[], || input.closed())
+        && !input.closed()
     {
-        if !input.closed() {
-            return Err(e.context("Qwen warmup failed"));
-        }
+        return Err(e.context("Qwen warmup failed"));
     }
     if input.closed() {
         return input.shutdown_result();
@@ -160,7 +159,7 @@ fn serve(path: &Path, language: &str, mode: &str, input: &Arc<Input>) -> Result<
         if session.as_ref().is_none_or(|s| s.epoch != work.epoch) {
             session = Some(Session::new(work.epoch, work.rate, language)?);
         }
-        if input.checkpoint(work.epoch, crate::backend::mlx::stream::synchronize) {
+        if input.checkpoint(work.epoch, crate::qwen::backend::mlx::stream::synchronize) {
             continue;
         }
         let state = session.as_mut().context("Missing recognition session")?;
@@ -178,11 +177,11 @@ fn serve(path: &Path, language: &str, mode: &str, input: &Arc<Input>) -> Result<
             let audio = state.onset.feed(&audio);
             state.forwarded += audio.len() as u64;
             state.live.feed(&decoder, &audio, work.final_input, &|| {
-                input.checkpoint(work.epoch, crate::backend::mlx::stream::synchronize)
+                input.checkpoint(work.epoch, crate::qwen::backend::mlx::stream::synchronize)
             })
         } else {
             state.batch.feed(&decoder, &audio, work.final_input, &|| {
-                input.checkpoint(work.epoch, crate::backend::mlx::stream::synchronize)
+                input.checkpoint(work.epoch, crate::qwen::backend::mlx::stream::synchronize)
             })
         };
         if !input.current(work.epoch) {
@@ -222,8 +221,8 @@ fn serve(path: &Path, language: &str, mode: &str, input: &Arc<Input>) -> Result<
         }
         if work.final_input {
             let mut peak = 0usize;
-            crate::backend::mlx::error::check(
-                unsafe { crate::backend::mlx::ffi::mlx_get_peak_memory(&mut peak) },
+            crate::qwen::backend::mlx::error::check(
+                unsafe { crate::qwen::backend::mlx::ffi::mlx_get_peak_memory(&mut peak) },
                 "MLX memory measurement",
             );
             input.publish(

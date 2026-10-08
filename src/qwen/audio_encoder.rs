@@ -1,10 +1,10 @@
 // Derived from second-state/qwen3_asr_rs; Apache-2.0. See NOTICE.
-use crate::tensor::{DType, Device, Tensor};
+use crate::qwen::tensor::{DType, Device, Tensor};
 use anyhow::Result;
 use std::collections::HashMap;
 
-use crate::config::AudioEncoderConfig;
-use crate::layers::{AudioEncoderLayer, Conv2d, LayerNorm, Linear};
+use crate::qwen::config::AudioEncoderConfig;
+use crate::qwen::layers::{AudioEncoderLayer, Conv2d, LayerNorm, Linear};
 
 /// Qwen3 ASR Audio Encoder (Whisper-style with chunk-based processing).
 pub struct AudioEncoder {
@@ -238,13 +238,13 @@ impl AudioEncoder {
 
         {
             let allow_i32: Vec<i32> = allow_data.iter().map(|&b| if b { 1 } else { 0 }).collect();
-            let allow_arr = crate::backend::mlx::array::MlxArray::from_i32(
+            let allow_arr = crate::qwen::backend::mlx::array::MlxArray::from_i32(
                 &allow_i32,
                 &[1, 1, total_tokens as i32, total_tokens as i32],
             );
             // Cast to bool for where_cond
-            let allow_bool = allow_arr.astype(crate::backend::mlx::ffi::mlx_dtype::MLX_BOOL);
-            let mask = Tensor::from_mlx(crate::backend::mlx::ops::where_cond(
+            let allow_bool = allow_arr.astype(crate::qwen::backend::mlx::ffi::mlx_dtype::MLX_BOOL);
+            let mask = Tensor::from_mlx(crate::qwen::backend::mlx::ops::where_cond(
                 &allow_bool,
                 &zero.inner,
                 &neg_inf.inner,
@@ -300,12 +300,12 @@ mod tests {
     #[test]
     #[ignore = "Requires INDEX_QWEN_MODEL; numerical encoder comparison, no UI"]
     fn short_tail_matches_unsplit_encoder() {
-        crate::backend::mlx::stream::init_mlx(true);
+        crate::qwen::backend::mlx::stream::init_mlx(true);
         let root = std::path::PathBuf::from(
             std::env::var_os("INDEX_QWEN_MODEL").expect("Set INDEX_QWEN_MODEL"),
         );
-        let cfg = crate::config::AsrConfig::from_file(&root.join("config.json")).unwrap();
-        let weights = crate::weights::load_model_weights(&root, Device::gpu()).unwrap();
+        let cfg = crate::qwen::config::AsrConfig::from_file(&root.join("config.json")).unwrap();
+        let weights = crate::qwen::weights::load_model_weights(&root, Device::gpu()).unwrap();
         let encoder = AudioEncoder::load(
             &weights,
             "audio_tower",

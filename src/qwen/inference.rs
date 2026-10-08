@@ -1,14 +1,16 @@
-use crate::tensor::{Device, Tensor};
+use crate::qwen::tensor::{Device, Tensor};
 use anyhow::{Context, Result};
 use std::path::Path;
 
-use crate::audio_encoder::AudioEncoder;
-use crate::config::AsrConfig;
-use crate::layers::compute_mrope_cos_sin;
-use crate::mel::WhisperFeatureExtractor;
-use crate::text_decoder::{create_causal_mask, KvCache, TextDecoder};
-use crate::tokenizer::{AsrTokenizer, AUDIO_PAD_TOKEN_ID, ENDOFTEXT_TOKEN_ID, IM_END_TOKEN_ID};
-use crate::weights;
+use crate::qwen::audio_encoder::AudioEncoder;
+use crate::qwen::config::AsrConfig;
+use crate::qwen::layers::compute_mrope_cos_sin;
+use crate::qwen::mel::WhisperFeatureExtractor;
+use crate::qwen::text_decoder::{KvCache, TextDecoder, create_causal_mask};
+use crate::qwen::tokenizer::{
+    AUDIO_PAD_TOKEN_ID, AsrTokenizer, ENDOFTEXT_TOKEN_ID, IM_END_TOKEN_ID,
+};
+use crate::qwen::weights;
 
 const MEL_SAMPLE_RATE: u32 = 16000;
 
@@ -182,7 +184,7 @@ impl AsrInference {
         let first_frame = cache.complete_blocks * block;
         let tokens_per_block = self.audio_encoder.get_output_length(block);
         let cached_tokens = cache.complete_blocks * tokens_per_block;
-        let mel = mel.to_dtype(crate::tensor::DType::Float16);
+        let mel = mel.to_dtype(crate::qwen::tensor::DType::Float16);
         mel.eval();
         timings.mel_seconds = started.elapsed().as_secs_f64();
         timings.reused_frames = first_frame;
@@ -359,7 +361,7 @@ impl AsrInference {
             tokens.push(198); // \n
             let prefix = format!("language {}", capitalize_first(lang));
             tokens.extend(self.tokenizer.encode(&prefix)?);
-            tokens.push(crate::tokenizer::ASR_TEXT_TOKEN_ID);
+            tokens.push(crate::qwen::tokenizer::ASR_TEXT_TOKEN_ID);
         } else {
             tokens.push(77091); // assistant
             tokens.push(198); // \n

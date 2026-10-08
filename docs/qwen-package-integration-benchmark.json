@@ -1,0 +1,71 @@
+{
+  "scope": "Qwen moved into src/qwen and the root Cargo package; no inference algorithm changes. Synthetic WAV only; no BLE, microphone, playback or UI.",
+  "model": "moona3k/mlx-qwen3-asr-1.7b-8bit",
+  "model_revision": "22c8abe6a6772122dda5905967d7496d1d3e8dd2",
+  "concurrent_native_compilation": {
+    "audio_seconds": 75.712375,
+    "elapsed": 77.144281167,
+    "first_partial_seconds": 1.424772125,
+    "peak_lag_seconds": 7.8,
+    "early_median_lag": 1.0,
+    "late_median_lag": 1.0,
+    "peak_memory_bytes": 2625991064,
+    "text": "最初の確認です。今日は指輪から届いた音声を日本語の文章に変換する仕組みについて説明します。ボタンを押すと音声の収集が始まり、話している間は文字が少しずつ表示されます。ボタンを離した後も届くのが遅れた音声を最後まで受け取ります。短い休憩を挟んだ場合でも文章の途中が消えてしまわないようにします。次の録音を始めた時には前の会話の内容を引き継がず新しい文章として処理します。これで最後の確認を終わります。最初の確認です。今日は指輪から届いた音声を日本語の文章に変換する仕組みについて説明します。ボタンを押すと音声の収集が始まり、話している間は文字が少しずつ表示されます。ボタンを話した後も。届くのが遅れた音声を最後まで受け取ります。短い休憩を挟んだ場合でも、文章の途中が消えてしまわないようにします。次の録音を始めたときには、前の会話の内容を引き継がず、新しい文章として処理します。これで最後の確認を終わります。"
+  },
+  "after_our_builds_finished": {
+    "audio_seconds": 75.712375,
+    "elapsed": 76.839861375,
+    "first_partial_seconds": 1.255450958,
+    "peak_lag_seconds": 4.2,
+    "early_median_lag": 0.4,
+    "late_median_lag": 1.2,
+    "peak_memory_bytes": 2608096152,
+    "text": "最初の確認です。今日は指輪から届いた音声を日本語の文章に変換する仕組みについて説明します。ボタンを押すと音声の収集が始まり、話している間は文字が少しずつ表示されます。ボタンを離した後も届くのが遅れた音声を最後まで受け取ります。短い休憩を挟んだ場合でも文章の途中が消えてしまわないようにします。次の録音を始めた時には前の会話の内容を引き継がず新しい文章として処理します。これで最後の確認を終わります。最初の確認です。今日は指輪から届いた音声を日本語の文章に変換する仕組みについて説明します。ボタンを押すと音声の収集が始まり、話している間は文字が少しずつ表示されます。ボタンを話した後も。届くのが遅れた音声を最後まで受け取ります。短い休憩を挟んだ場合でも、文章の途中が消えてしまわないようにします。次の録音を始めたときには、前の会話の内容を引き継がず、新しい文章として処理します。これで最後の確認を終わります。"
+  },
+  "packaged_adapter_priority": {
+    "live_without_batch": {
+      "first_partial_seconds": 1.202341417,
+      "max_pcm_lag_seconds": 0.6,
+      "finish_seconds": 1.154660666,
+      "peak_memory_bytes": 2268728498,
+      "text": "こんにちは。これは音声認識の動作確認です。"
+    },
+    "live_while_batch_paused": [
+      {
+        "first_partial_seconds": 1.202079125,
+        "max_pcm_lag_seconds": 0.2,
+        "finish_seconds": 1.172235375,
+        "peak_memory_bytes": 2268728498,
+        "text": "こんにちは。これは音声認識の動作確認です。",
+        "recording": 1,
+        "pause_ack_seconds": 0.199359834
+      },
+      {
+        "first_partial_seconds": 1.403831375,
+        "max_pcm_lag_seconds": 0.4,
+        "finish_seconds": 0.666891625,
+        "peak_memory_bytes": 2268728498,
+        "text": "こんにちは。これは音声認識の動作確認です。",
+        "recording": 2,
+        "pause_ack_seconds": 0.133473291
+      }
+    ],
+    "batch_text": "最初の確認です。今日は指輪から届いた音声を日本語の文章に変換する仕組みについて説明します。ボタンを押すと音声の収集が始まり、話している間は文字が少しずつ表示されます。ボタンを離した後も届くのが遅れた音声を最後まで受け取ります。短い休憩を挟んだ場合でも文章の途中が消えてしまわないようにします。次の録音を始めたときには前の会話の内容を引き継がず新しい文章として処理します。これで最後の確認を終わります。",
+    "batch_segments": [
+      [
+        0.0,
+        27.525
+      ],
+      [
+        27.525,
+        37.8561875
+      ]
+    ]
+  },
+  "limitations": [
+    "The user continued other work. These single trials do not isolate thermal, scheduling or other system-load effects.",
+    "The after-build peak lag of 4.2s is higher than the previously recorded 2.2s. A packaging-only change is not evidence of equal or improved latency.",
+    "PCM lag is accepted minus consumed samples divided by input rate, not device-to-UI latency.",
+    "These are generated audio fixtures; they do not measure ring microphone accuracy."
+  ]
+}

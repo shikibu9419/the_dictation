@@ -1,9 +1,8 @@
 #!/bin/sh
 set -eu
 cd "$(dirname "$0")"
-cargo build --release --bins
-git submodule update --init -- native/qwen-rs/vendor/mlx-c
-cargo build --release --locked --manifest-path native/qwen-rs/Cargo.toml --target-dir native/qwen-rs/target
+git submodule update --init -- vendor/mlx-c
+cargo build --release --locked --bins
 signing_identity=${CODESIGN_IDENTITY:-}
 if [ -z "$signing_identity" ]; then
     signing_identity=$(security find-identity -v -p codesigning | awk '/"Apple Development:/ {print $2; exit}')
@@ -14,10 +13,10 @@ mkdir -p "$app/Contents/Resources"
 cp LICENSE NOTICE "$app/Contents/Resources/"
 cp target/release/index-voice "$app/Contents/MacOS/IndexVoice"
 cp target/release/pebble-index "$app/Contents/Helpers/pebble-index"
-cp native/qwen-rs/target/release/QwenNative native/qwen-rs/target/release/mlx.metallib "$app/Contents/Helpers/"
+cp target/release/QwenNative target/release/mlx.metallib "$app/Contents/Helpers/"
 mkdir -p "$app/Contents/Resources/qwen"
-cp native/qwen-rs/LICENSE native/qwen-rs/NOTICE native/qwen-rs/MLX-LICENSE "$app/Contents/Resources/qwen/"
-cp native/qwen-rs/vendor/mlx-c/LICENSE "$app/Contents/Resources/qwen/MLX-C-LICENSE"
+cp licenses/qwen/LICENSE licenses/qwen/NOTICE licenses/qwen/MLX-LICENSE "$app/Contents/Resources/qwen/"
+cp vendor/mlx-c/LICENSE "$app/Contents/Resources/qwen/MLX-C-LICENSE"
 codesign --force --sign "${signing_identity:--}" --identifier local.pebble.index-voice.QwenNative "$app/Contents/Helpers/QwenNative"
 codesign --force --sign "${signing_identity:--}" --identifier local.pebble.index-voice.mlx-metal "$app/Contents/Helpers/mlx.metallib"
 for helper in Bluetooth SpeechStream AudioDecode Paste Microphone; do

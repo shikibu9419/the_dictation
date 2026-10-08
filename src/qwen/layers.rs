@@ -1,6 +1,6 @@
 // Derived from second-state/qwen3_asr_rs; Apache-2.0. See NOTICE.
-use crate::tensor::{Device, Tensor};
-use crate::weights::{get_weight, get_weight_opt};
+use crate::qwen::tensor::{Device, Tensor};
+use crate::qwen::weights::{get_weight, get_weight_opt};
 use anyhow::Result;
 use std::collections::HashMap;
 
@@ -102,7 +102,7 @@ impl Linear {
     }
 }
 fn quantized(w: &Tensor, s: &Tensor, b: &Tensor, x: Option<&Tensor>) -> Tensor {
-    use crate::backend::mlx::{array::MlxArray, ffi::*, stream::default_stream};
+    use crate::qwen::backend::mlx::{array::MlxArray, ffi::*, stream::default_stream};
     let mut out = MlxArray::empty();
     let group = mlx_optional_int {
         value: 64,
@@ -319,7 +319,7 @@ impl AudioEncoderLayer {
         let h = self.ffn.forward(&h);
         let out = h + residual;
         // Match the reference encoder's fp16 overflow protection.
-        use crate::backend::mlx::{array::MlxArray, ops};
+        use crate::qwen::backend::mlx::{array::MlxArray, ops};
         let low = MlxArray::scalar_f32(-64504.0).astype(out.inner.dtype());
         let high = MlxArray::scalar_f32(64504.0).astype(out.inner.dtype());
         Tensor::from_mlx(ops::clip(&out.inner, &low, &high))

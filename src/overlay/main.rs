@@ -1,3 +1,7 @@
+// Cargo attaches build.rs native libraries to the package library. Retain that
+// dependency even though this executable uses the macOS bridge through FFI.
+extern crate pebble_index as _;
+
 mod model;
 mod presentation;
 #[path = "../qwen_runtime.rs"]

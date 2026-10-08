@@ -1,12 +1,31 @@
 //! Starts only QwenNative, never the application, BLE, microphone, or a window.
-use base64::{engine::general_purpose::STANDARD, Engine};
-use serde_json::{json, Value};
+use base64::{Engine, engine::general_purpose::STANDARD};
+use serde_json::{Value, json};
 use std::{
     io::{BufRead, BufReader, Write},
     process::{Child, ChildStdin, Command, Stdio},
     sync::mpsc,
     time::{Duration, Instant},
 };
+
+#[test]
+fn worker_and_metal_resource_are_built_by_the_application_package() {
+    let worker = std::path::Path::new(env!("CARGO_BIN_EXE_QwenNative"));
+    assert!(worker.is_file());
+    assert!(
+        worker
+            .with_file_name("mlx.metallib")
+            .metadata()
+            .unwrap()
+            .len()
+            > 0
+    );
+    // No model, microphone, BLE or window is initialized on a usage error.
+    let result = Command::new(worker).output().unwrap();
+    assert!(!result.status.success());
+    assert!(String::from_utf8_lossy(&result.stderr).contains("usage: QwenNative"));
+}
+
 struct Worker {
     child: Child,
     input: Option<ChildStdin>,
@@ -62,10 +81,12 @@ impl Worker {
         };
         let ready = worker.until("ready", Duration::from_secs(30));
         assert_eq!(ready["protocol_version"], 2);
-        assert!(!worker
-            .seen
-            .iter()
-            .any(|(_, v)| matches!(v["type"].as_str(), Some("partial" | "final"))));
+        assert!(
+            !worker
+                .seen
+                .iter()
+                .any(|(_, v)| matches!(v["type"].as_str(), Some("partial" | "final")))
+        );
         worker
     }
     fn send(&mut self, v: Value) {

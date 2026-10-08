@@ -1,5 +1,5 @@
 //! Explicit headless tests with the pinned model and generated Japanese fixtures.
-use index_qwen::{
+use pebble_index::qwen::{
     backend::mlx::stream::init_mlx,
     inference::{AsrInference, WindowCache},
     tensor::Device,
@@ -22,13 +22,15 @@ fn repeated_audio_long_coverage_prefix_reuse_and_cancellation() {
     init_mlx(true);
     let root = PathBuf::from(std::env::var_os("INDEX_QWEN_MODEL").expect("Set INDEX_QWEN_MODEL"));
     let model = AsrInference::load(&root, Device::gpu()).unwrap();
-    let tokenizer = index_qwen::tokenizer::AsrTokenizer::from_dir(&root).unwrap();
+    let tokenizer = pebble_index::qwen::tokenizer::AsrTokenizer::from_dir(&root).unwrap();
     let ids = tokenizer
         .encode("こんにちは。これは音声認識の動作確認です。")
         .unwrap();
     assert_eq!(
         ids,
-        vec![89015, 1773, 129562, 78685, 70074, 110790, 15767, 117748, 114277, 37541, 1773]
+        vec![
+            89015, 1773, 129562, 78685, 70074, 110790, 15767, 117748, 114277, 37541, 1773
+        ]
     );
     assert_eq!(tokenizer.decode(&[151704]).unwrap(), "<asr_text>");
     let short = wav("short.wav");
@@ -95,11 +97,13 @@ fn repeated_audio_long_coverage_prefix_reuse_and_cancellation() {
         .unwrap();
     assert_eq!(clean.token_ids, short_ids);
     assert_eq!(clean.timings.reused_positions, 0);
-    assert!(model
-        .transcribe_samples(&short, Some("Japanese"), &[], || true)
-        .unwrap_err()
-        .to_string()
-        .contains("cancelled"));
+    assert!(
+        model
+            .transcribe_samples(&short, Some("Japanese"), &[], || true)
+            .unwrap_err()
+            .to_string()
+            .contains("cancelled")
+    );
     let calls = Cell::new(0);
     let result = model.transcribe_samples(&short, Some("Japanese"), &[], || {
         calls.set(calls.get() + 1);

@@ -57,7 +57,7 @@ pub struct mlx_optional_float {
     pub has_value: bool,
 }
 
-extern "C" {
+unsafe extern "C" {
     // -----------------------------------------------------------------------
     // Array lifecycle
     // -----------------------------------------------------------------------
@@ -456,7 +456,7 @@ pub struct mlx_optional_dtype {
     pub value: mlx_dtype,
     pub has_value: bool,
 }
-extern "C" {
+unsafe extern "C" {
     pub fn mlx_quantized_matmul(
         res: *mut mlx_array,
         x: mlx_array,
@@ -482,11 +482,11 @@ extern "C" {
     ) -> c_int;
 }
 
-extern "C" {
+unsafe extern "C" {
     pub fn mlx_erf(res: *mut mlx_array, a: mlx_array, s: mlx_stream) -> c_int;
 }
 
-extern "C" {
+unsafe extern "C" {
     pub fn mlx_as_strided(
         res: *mut mlx_array,
         a: mlx_array,
@@ -499,7 +499,7 @@ extern "C" {
     ) -> c_int;
 }
 
-extern "C" {
+unsafe extern "C" {
     pub fn mlx_closure_new_unary(
         fun: unsafe extern "C" fn(*mut mlx_array, mlx_array) -> c_int,
     ) -> mlx_closure;
@@ -518,7 +518,7 @@ extern "C" {
     ) -> c_int;
 }
 
-extern "C" {
+unsafe extern "C" {
     pub fn mlx_set_error_handler(
         handler: unsafe extern "C" fn(*const c_char, *mut c_void),
         data: *mut c_void,
@@ -526,6 +526,6 @@ extern "C" {
     );
 }
 
-extern "C" {
+unsafe extern "C" {
     pub fn mlx_get_peak_memory(res: *mut usize) -> std::os::raw::c_int;
 }
