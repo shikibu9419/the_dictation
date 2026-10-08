@@ -29,6 +29,7 @@ pub struct Settings {
     pub batch_speech: Option<SpeechModel>,
     pub presentation: Presentation,
     pub gestures: GestureBindings,
+    pub reception: pebble_index::reception::config::Reception,
 }
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -106,7 +107,12 @@ impl Settings {
     }
     pub fn load_from(path: &Path) -> Result<Self> {
         match std::fs::read(path) {
-            Ok(bytes) => serde_json::from_slice(&bytes).context("Invalid Index Voice settings"),
+            Ok(bytes) => {
+                let value: Self =
+                    serde_json::from_slice(&bytes).context("Invalid Index Voice settings")?;
+                value.reception.validate()?;
+                Ok(value)
+            }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Self::default()),
             Err(e) => Err(e.into()),
         }
@@ -122,6 +128,7 @@ impl Settings {
         })
     }
     pub fn validate(&self) -> Result<()> {
+        self.reception.validate()?;
         let plan = self.recognition_plan();
         let uses = |model| plan.live == Some(model) || plan.batch == model;
         if uses(SpeechModel::OnDevice) {

@@ -263,6 +263,20 @@ P=50msは待機中だけで最大20回/秒・72,000回/時のS要求になる評
 
 `--log` は全診断、`-v` はコンソール詳細。ログには各観測、候補/source/session ID、状態遷移、期限と遅れ、gesture発火、保持/消費PCM量を残す。本段階ではアプリの実行や表示テストは行わない。
 
+### 状態・PCM契約の実装状況
+
+`src/reception/` に機器やUIに依存しない実装を追加した。
+
+- `config.rs`: 独立した待ち時間の初期値・検証。Settingsの `reception` へ保存し、候補作成時にコピーする。
+- `button_detector.rs`: 83のprefix差分と分類根拠。再送・履歴reset・対応できない履歴を新しい押下として推測しない。
+- `session_state.rs`: sourceの所属、短押し連結、UI/終了猶予、長押し再開、snapshot、全文認識の開始条件。取得済み範囲の固定watermarkでSingleを保留する。
+- `input_effects.rs`: 状態から独立したPCM投入計画。200ms等の未投入分だけを共有参照で渡す。確定shortの除外後は投入済みの範囲を確認してliveを再構築し、全文はfinal・欠番なしを再確認して作る。
+- `src/pcm.rs`: 不変ブロックの共有と範囲参照。cursorの先頭を二分探索し、録音の先頭から毎回全ブロックを走査しない。
+
+**これは新しい経路の構成要素であり、実アプリへの切替完了ではない。** 既存の `adapters/input` への接続、旧検出器の削除、S/R/C取得順・取得時刻の配送、認識ジョブの世代管理・障害復旧は引き続き実装する。既存UIの起動や再起動は行っていない。
+
+状態機械の観測列テストは `src/reception/session_state_tests.rs` に置く。UIなしで再実行する場合は `cargo test --release --lib reception::`。Esc・編集・履歴を扱う既存表示モデルの確認は `cargo test --release --bin index-voice` の純粋なモデルテストを使い、ウィンドウは生成しない。
+
 
 ## 10. QwenをPythonなしで実行する案
 
