@@ -88,6 +88,14 @@ pub enum Observation {
     Connected(bool),
     Recognized(SessionId),
     Lost(SourceId),
+    /// A newly discovered source can already be missing an evicted prefix.
+    /// Assign and fail it atomically, without an intermediate live/tap effect.
+    LostSource(SourceObservation),
+    /// The ring's collection range regressed. Complete audio and submitted
+    /// recognition jobs survive; operation prefixes cannot cross this boundary.
+    Discontinuity {
+        unread: u64,
+    },
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Action {
@@ -241,10 +249,42 @@ impl SessionState {
         self.now = now;
         let mut actions = vec![];
         // Strictly earlier deadlines run first; equal-time input always wins.
-        self.timers(now, false, &mut actions);
+        if !matches!(observation, Observation::Discontinuity { .. }) {
+            self.timers(now, false, &mut actions);
+        }
         match observation {
             Observation::Collecting { active, unread } => self.collecting(active, unread, now)?,
-            Observation::Source(source) => self.source(source, now, &mut actions)?,
+            Observation::Source(source) => self.source(source, now, false, &mut actions)?,
+            Observation::LostSource(source) => {
+                let id = source.id.clone();
+                self.source(source, now, true, &mut actions)?;
+                self.fail(self.sources[&id].session);
+            }
+            Observation::Discontinuity { unread } => {
+                self.pending_tap = None;
+                self.active = None;
+                self.known_end = unread;
+                self.processed_end = unread;
+                self.range_pending = false;
+                self.generation += 1;
+                let ids: Vec<_> = self.sessions.keys().copied().collect();
+                for id in ids {
+                    let complete = self.complete(id);
+                    let session = self.sessions.get_mut(&id).unwrap();
+                    session.prefix = None;
+                    session.resume = None;
+                    session.upper = Some(unread);
+                    if session.submitted {
+                        continue;
+                    }
+                    session.end(now);
+                    if session.sources.is_empty() {
+                        self.retire(id, &mut actions);
+                    } else if !complete {
+                        self.fail(id);
+                    }
+                }
+            }
             Observation::Watermark {
                 known_end,
                 processed_end,
@@ -271,10 +311,7 @@ impl SessionState {
             Observation::Recognized(id) => self.retire(id, &mut actions),
             Observation::Lost(id) => {
                 if let Some(source) = self.sources.get(&id) {
-                    let session = self.sessions.get_mut(&source.session).unwrap();
-                    session.failed = true;
-                    session.collecting = false;
-                    session.ui_deadline = None;
+                    self.fail(source.session);
                 }
             }
         }
@@ -316,7 +353,7 @@ impl SessionState {
                     "Decoded watermark exceeds known receive range"
                 );
             }
-            Observation::Source(incoming) => {
+            Observation::Source(incoming) | Observation::LostSource(incoming) => {
                 ensure!(
                     incoming.first_collection <= incoming.last_collection,
                     "Source collection interval is reversed"
@@ -348,6 +385,21 @@ impl SessionState {
             _ => {}
         }
         Ok(())
+    }
+
+    fn fail(&mut self, id: SessionId) {
+        let session = self.sessions.get_mut(&id).unwrap();
+        session.failed = true;
+        session.collecting = false;
+        session.ui_deadline = None;
+        session.prefix = None;
+        session.resume = None;
+        // A failed parent must never lend a live context to the next recording.
+        for child in self.sessions.values_mut() {
+            if child.resume.is_some_and(|r| r.parent == id) {
+                child.resume = None;
+            }
+        }
     }
 
     fn prepare(&mut self, first: u64, now: u64, collecting: bool) -> Result<SessionId> {
@@ -382,6 +434,9 @@ impl SessionState {
     }
     fn collecting(&mut self, active: bool, unread: u64, now: u64) -> Result<()> {
         if !active {
+            if self.active.is_some_and(|id| self.sessions[&id].failed) {
+                self.active = None;
+            }
             if let Some(session) = self.active.and_then(|id| self.sessions.get_mut(&id))
                 && !session.submitted
                 && !session.failed
@@ -393,9 +448,11 @@ impl SessionState {
         if self
             .active
             .and_then(|id| self.sessions.get(&id))
-            .is_some_and(|s| s.collecting)
+            .is_some_and(|s| s.collecting || s.failed)
         {
-            return Ok(()); // Repeated S never extends the UI deadline.
+            // Repeated S never extends UI deadlines or creates another candidate
+            // for a failed hold. A false observation rearms the next operation.
+            return Ok(());
         }
         let parent = self
             .active
@@ -428,6 +485,7 @@ impl SessionState {
         &mut self,
         incoming: SourceObservation,
         now: u64,
+        lost: bool,
         actions: &mut Vec<Action>,
     ) -> Result<()> {
         let id = incoming.id.clone();
@@ -441,7 +499,8 @@ impl SessionState {
                     !s.submitted
                         && !s.failed
                         && s.sources.is_empty()
-                        && incoming.first_collection >= s.first
+                        && (incoming.first_collection >= s.first
+                            || lost && incoming.last_collection >= s.first)
                         && s.upper.is_none_or(|end| incoming.first_collection < end)
                 })
                 .map(|s| s.id)
@@ -493,6 +552,7 @@ impl SessionState {
                 s.sources.is_empty() && s.resume.is_some_and(|r| r.parent == session_id)
             })
             && continues_unfinished
+            && !lost
         {
             self.join(session_id, child, actions);
         }

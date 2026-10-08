@@ -2,9 +2,9 @@
 
 2026-10-09更新。最新の指定に合わせ、**収集中フラグで保持を開始し、50msの表示待ち・終了猶予・タップ連結を使う**案に整理した。待ち時間はMacが観測したイベントに対して適用する。
 
-本書を受入条件として実装を進めている。依頼に合わせ、Qwenの実装・評価から着手し、その後BLE受信と状態管理を変更する。プロトコルと既存ログの根拠は [解析根拠](ble-protocol-findings.md) を参照。
+本書を受入条件として、Qwenの実装・評価、その後BLE受信と状態管理の変更を行った。プロトコルと既存ログの根拠は [解析根拠](ble-protocol-findings.md) を参照。
 
-現時点ではQwenのRust＋MLX推論コア、8bit重み、prefix再利用、数値・実モデルテストまで実装し、[比較結果](qwen-native-evaluation.md) を記録した。有限窓のlive制御、全文区間処理、常駐workerも実装・評価した。アプリの呼び出し・モデル検証・同梱をネイティブへ切り替えた。live優先の実行枠と停止確認、2窓の投入上限、異常時のワーカー再起動・PCM再送も実装した。BLEの音声所有・状態遷移・S/R/C選択・接続方針を接続済み。受信・認識・モデル間IPCに上限を設けた。受入条件全体の監査を続けている。アプリの再起動・ウィンドウ表示テストは行っていない。
+QwenのRust＋MLX推論コア、8bit重み、prefix再利用、数値・実モデルテストを実装し、[比較結果](qwen-native-evaluation.md) を記録した。有限窓のlive制御、全文区間処理、常駐workerも実装・評価した。アプリの呼び出し・モデル検証・同梱をネイティブへ切り替えた。live優先の実行枠と停止確認、2窓の投入上限、異常時のワーカー再起動・PCM再送も実装した。BLEの音声所有・状態遷移・S/R/C選択・接続方針を接続済み。受信・認識・モデル間IPCに上限を設け、EOF・欠落・カウンターの継続世代まで画面なしで確認した。アプリの再起動・ウィンドウ表示テストは行っていない。
 
 ## 1. 基本動作
 
@@ -287,7 +287,7 @@ ASR障害時の再起動・再送は `recognition/recovery.rs` に接続した�
 
 JSONLは16MiB/行。診断ログは256KiBずつ分けて読み、長いログを理由にモデルを失敗させない。ファイル入力は1MiBのPCMごとに送信し、最後だけfinalにする。モデルの停止ACKは、結果をキューへ入れる前に独立したobserverで処理する。容量不足や不正な巨大フレームは最終結果・保存位置の成功通知に変換しない。過負荷で処理全体を終了した場合、メモリ上だけの録音をプロセス再起動後に復元する仕組みはない。
 
-`tests/ipc_limits.rs` とIPC/helper単体テストは、キュー満杯、ACK監視、途中行のキャンセル、改行のない巨大入力、1フレームを超えるファイルの全バイト到達を確認する。GUIのイベントキュー・webhookの受付キューは今回のIPC変更対象外で、受入条件監査で別途扱う。
+`tests/ipc_limits.rs` とIPC/helper単体テストは、キュー満杯、ACK監視、途中行のキャンセル、改行のない巨大入力、1フレームを超えるファイルの全バイト到達を確認する。GUIの文字列イベントキュー・webhookの受付キューは音声を保持する受信経路とは別で、今回のIPC上限の対象に含めていない。
 
 受入監査で、R.startの前へ消えたCが解析watermarkを止め、後続のSingle待機が解除されなくなる経路を修正した。検証済みCの取得位置とsourceの連続PCM位置を分け、明示した欠落より先のイベントは処理する。欠落したsourceはfailedのまま保持し、全文認識へ成功として送らない。起動前sourceを読み飛ばした場合も解析watermarkに穴を残さない。通常の順不同Cは欠番が届くまで待つ。
 
@@ -297,17 +297,31 @@ Bluetooth helperの起動も接続再試行ループへ入れた。IPCのready�
 
 合成bridgeを最初の音声Cの転送直後に終了させ、実際のS/R/C・接続ループで残りCから復旧することを確認した。boundaryは一回、各Cの取得も一回、raw音声は欠落なし。電源OFFでhelperを再起動しないこと、初回起動失敗・不正JSON・無応答からの復旧をmockプロセスで確認した。Swiftの広告／無線状態ポリシー10シナリオもCoreBluetoothを生成せず検証し、製品用Swift helperはコンパイルのみ行った。
 
-### 受入監査メモ（実装継続中）
+### 受入確認と実機で未測定の範囲
+
+Rの範囲が巻き戻った場合の継続世代を実装した。通常の16bit周回は同じ世代とし、範囲が後退した場合は新しいsource名前空間と単調な内部位置へ移る。取得cursorが新しい範囲内にあっても先頭から取り直し、キャッシュ済みSを使わずに状態を確認する。旧世代の未完了音声はfailedとして保持し、完備済み音声の全文認識は継続する。保存位置には世代を付け、遅れて完了した旧録音が新世代のcursorを書き換えないようにした。Rだけでは区別できない完全一周・同じ番号へのリセットを検出できるとは扱わない。
+
+欠落が確定したsourceにも後続Cを保持できるようにし、末尾の到着が受信・認識プロセス全体を停止させる経路を修正した。最初に見つけたCが欠落後の末尾だけでもsourceを登録して失敗を通知する。失敗した押下に対するtrue反復で新しい録音候補を作らず、falseの観測後に次の操作へ進む。欠番のPCMを補完したり、不完全な音声から成功finalを作ったりしない。合成IPCで後続の完全な録音が認識されること、旧世代の全文結果と新しい保存位置が両立することを確認した。
 
 | 範囲 | 確認済みの根拠 | 残る確認 |
 | --- | --- | --- |
 | 第1〜4節の50ms・short/long・結合・表示世代 | `session_state_tests.rs`、純粋な表示モデル、合成TLVのIPC | ファームウェアの83 reset・飽和条件は未確定。対応不明を新しい押下と断定しない |
-| PCMの保持・欠番・live cursor・全文範囲 | `recordings.rs`、`input_effects.rs`、`pcm.rs`、`reception_pipeline.rs` | リングのcounter巻き戻り／リセット時の扱いと、復旧不能sourceの後続Cを監査する |
+| PCMの保持・欠番・live cursor・全文範囲 | `recordings.rs`、`input_effects.rs`、`pcm.rs`、`reception_pipeline.rs`。周回・範囲後退・欠落末尾・旧世代の認識完了を追加確認 | Rの番号だけで完全一周と同じ番号へのresetを区別することはできない |
 | S/R/C・接続期間・広告ヒント | 合成時計のscheduler/connectionテスト、Swift広告フィルターテスト | 電源OFF／復帰の純粋ポリシーと、helper終了後の実受信ループ復旧を合成IPCで確認済み。実機でのOS挙動は未測定 |
 | Qwen native・有限窓・停止ACK・再送 | 固定重みの数値比較、実モデル比較、live/batch障害注入 | 実際のBLE・UIを含む総遅延は未測定 |
-| IPC上限・部分行・ファイル分割 | `ipc.rs`、helper単体、`ipc_limits.rs` | GUI/Webhookの従来キューは変更対象外。EOFは全文・保存位置・モデルの正常終了を待つよう修正し、IPCで確認済み |
+| IPC上限・部分行・ファイル分割 | `ipc.rs`、helper単体、`ipc_limits.rs`。EOFは全文・保存位置・モデルの正常終了を待つことをIPCで確認 | GUIの文字列イベント・Webhook受付の従来キューは本設計の音声受信経路とは別で、今回の上限の対象外 |
 
-この時点の画面なしテストは224件通過、4件は通常実行ではignored。実Qwenの独立したlive/batch復旧テストを別途1件実行して通過。Clippyは警告なし。実機の接続維持・復帰時間・電池消費の測定、既存UIの起動や再起動は行っていない。
+画面なしテストは236件通過、実モデル等の明示実行用8件は通常実行ではignored。実Qwenの独立したlive/batch復旧テストを別途1件再実行して通過。Clippyは全targetで警告なし。Swiftの純粋ポリシー10シナリオと製品用helperのコンパイルも確認済み。実機の接続維持・復帰時間・電池消費の測定、既存UIの起動や再起動は行っていない。
+
+今回の回帰確認コマンド（GUI、BLE、マイクを起動しない）:
+
+```sh
+CARGO_INCREMENTAL=0 cargo test --release --lib --bin pebble-index --bin index-voice \
+  --test adapters --test reception_pipeline --test ipc_limits \
+  --test qwen_numerics --test qwen_runtime --test qwen_worker_runtime
+CARGO_INCREMENTAL=0 cargo clippy --release --all-targets -- -D warnings
+cargo fmt --check
+```
 
 状態機械の観測列テストは `src/reception/session_state_tests.rs` に置く。UIなしで再実行する場合は `cargo test --release --lib reception::`。Esc・編集・履歴を扱う既存表示モデルの確認は `cargo test --release --bin index-voice` の純粋なモデルテストを使い、ウィンドウは生成しない。
 

@@ -121,7 +121,8 @@ fn thousand_chunks_survive_retention_and_index_wrap() {
                 &collection(first as u32, n == 999, &[n as i16]),
                 &out,
             )
-            .unwrap();
+            .unwrap()
+            .parts;
         for event in events {
             all.extend(event.samples.iter().copied());
             assert_eq!(event.final_part, n == 999);
@@ -129,6 +130,8 @@ fn thousand_chunks_survive_retention_and_index_wrap() {
         assert!(
             recordings
                 .retain(index.wrapping_sub(478), index.wrapping_add(1), &out)
+                .unwrap()
+                .lost
                 .is_empty()
         );
     }
@@ -143,6 +146,7 @@ fn duplicates_and_out_of_order_chunks_are_not_repeated() {
         for part in recordings
             .add(n, &collection(0, n == 3, &[n as i16]), &out)
             .unwrap()
+            .parts
         {
             all.extend(part.samples.iter().copied());
         }
@@ -158,12 +162,14 @@ fn startup_boundary_skips_only_previous_recordings() {
         recordings
             .add(19, &collection(19, true, &[1]), &out)
             .unwrap()
+            .parts
             .is_empty()
     );
     assert_eq!(
         recordings
             .add(20, &collection(20, true, &[2]), &out)
-            .unwrap()[0]
+            .unwrap()
+            .parts[0]
             .samples
             .iter()
             .copied()

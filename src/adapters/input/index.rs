@@ -1,5 +1,10 @@
 use super::{AudioChunk, InputAdapter, InputEvent, interaction::Interaction, pcm::PcmInput};
-use crate::{config, output::Output, recordings::Recordings, settings::Settings};
+use crate::{
+    config,
+    output::Output,
+    recordings::{Checkpoint, Recordings},
+    settings::Settings,
+};
 use anyhow::{Context, Result, ensure};
 use base64::{Engine, engine::general_purpose::STANDARD};
 use pebble_index::reception::{
@@ -169,9 +174,26 @@ impl InputAdapter for IndexInput {
                 let start =
                     u16::try_from(message["start"].as_u64().context("Missing range start")?)?;
                 let end = u16::try_from(message["end"].as_u64().context("Missing range end")?)?;
-                let lost = self.recordings.retain(start, end, output);
-                self.known_end = self.known_end.max(self.recordings.position(end));
-                for key in lost {
+                let range = self.recordings.retain(start, end, output)?;
+                if range.discontinuity {
+                    self.parsed.clear();
+                    self.unread = range.start;
+                    self.known_end = range.end;
+                    self.committed = Some(range.start);
+                    self.history = ButtonHistory::default();
+                    self.classification.clear();
+                    self.collecting = None;
+                    if self.save_cursor {
+                        events.extend(self.observe(
+                            Observation::Discontinuity {
+                                unread: range.start,
+                            },
+                            output,
+                        )?);
+                    }
+                }
+                self.known_end = self.known_end.max(range.end);
+                for key in range.lost {
                     events.extend(if self.save_cursor {
                         self.observe(Observation::Lost(key), output)?
                     } else {
@@ -181,7 +203,7 @@ impl InputAdapter for IndexInput {
                 // Missing collections before R.start can no longer arrive.
                 // Loss is reported above; it must not hold every later tap's
                 // metadata watermark forever. This does not complete any PCM.
-                self.advance_parsed(self.recordings.position(start));
+                self.advance_parsed(range.start);
                 if self.save_cursor {
                     events.extend(self.observe(
                         Observation::Watermark {
@@ -202,7 +224,7 @@ impl InputAdapter for IndexInput {
                 let index = u16::try_from(message["index"].as_u64().context("Missing index")?)?;
                 let raw =
                     STANDARD.decode(message["raw"].as_str().context("Missing raw collection")?)?;
-                let parts = self.recordings.add(index, &raw, output)?;
+                let received = self.recordings.add(index, &raw, output)?;
                 // The raw C was validated even if it was a retired/pre-start
                 // source or awaits a gap in its source. Earlier missing C still
                 // hold unread back until received or explicitly evicted by R.
@@ -211,7 +233,7 @@ impl InputAdapter for IndexInput {
                     self.parsed.insert(position);
                 }
                 let mut updates = std::collections::BTreeMap::new();
-                for part in parts {
+                for part in received.parts {
                     if !self.save_cursor {
                         events.push(InputEvent::Audio(AudioChunk {
                             key: part.key,
@@ -247,6 +269,23 @@ impl InputAdapter for IndexInput {
                     updates.insert(part.key.clone(), (classification, part.samples));
                     if position >= self.unread {
                         self.parsed.insert(position);
+                    }
+                }
+                // A source's metadata can arrive before its missing PCM prefix,
+                // or after that prefix has been evicted. Give it an owner even
+                // when add() cannot yield a contiguous audio block yet.
+                if let Some(key) = received.source {
+                    if received.lost {
+                        if self.save_cursor {
+                            let observation = self.recordings.observation(&key, None)?;
+                            events.extend(
+                                self.observe(Observation::LostSource(observation), output)?,
+                            );
+                        } else {
+                            events.push(InputEvent::Discard(key));
+                        }
+                    } else if self.save_cursor {
+                        updates.entry(key).or_default();
                     }
                 }
                 for (key, (classification, samples)) in updates {
@@ -302,11 +341,13 @@ impl InputAdapter for IndexInput {
     }
     fn commit(&mut self, checkpoint: &Value) -> Result<()> {
         if self.save_cursor {
-            let index = u16::try_from(checkpoint.as_u64().context("Invalid Index checkpoint")?)?;
-            let position = self.recordings.position(index);
-            if self.committed.is_none_or(|old| position > old) {
-                config::save_cursor(&self.address, index)?;
-                self.committed = Some(position);
+            let checkpoint: Checkpoint =
+                serde_json::from_value(checkpoint.clone()).context("Invalid Index checkpoint")?;
+            if self.recordings.current_checkpoint(&checkpoint)
+                && self.committed.is_none_or(|old| checkpoint.position > old)
+            {
+                config::save_cursor(&self.address, checkpoint.position as u16)?;
+                self.committed = Some(checkpoint.position);
             }
         }
         Ok(())

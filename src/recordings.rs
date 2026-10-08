@@ -6,6 +6,7 @@ use crate::{
     pcm::Pcm,
 };
 use anyhow::{Context, Result, ensure};
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 
@@ -19,6 +20,27 @@ pub struct Part {
     pub index: u16,
     pub buttons: Option<Vec<String>>,
     pub lifetime_count: Option<u32>,
+}
+
+#[derive(Default)]
+pub struct Received {
+    pub parts: Vec<Part>,
+    /// Metadata must reach the reducer even when the contiguous PCM is empty.
+    pub source: Option<String>,
+    pub lost: bool,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Checkpoint {
+    epoch: String,
+    pub position: u64,
+}
+
+pub struct RangeUpdate {
+    pub start: u64,
+    pub end: u64,
+    pub discontinuity: bool,
+    pub lost: Vec<String>,
 }
 
 #[derive(Clone, Copy)]
@@ -43,6 +65,7 @@ struct StoredPart {
     part: Part,
 }
 struct Source {
+    epoch: uuid::Uuid,
     first: u64,
     next: u64,
     rate: Option<u32>,
@@ -72,6 +95,7 @@ pub struct Recordings {
     high_water: Option<u64>,
     boundary: Option<u64>,
     available_start: Option<u64>,
+    last_range: Option<(u64, u64)>,
     released: HashSet<String>,
     released_order: VecDeque<String>,
     samples: usize,
@@ -93,6 +117,7 @@ impl Recordings {
             high_water: None,
             boundary: None,
             available_start: None,
+            last_range: None,
             released: HashSet::new(),
             released_order: VecDeque::new(),
             samples: 0,
@@ -121,9 +146,19 @@ impl Recordings {
             complete: source.complete(),
         })
     }
-    pub fn next_index(&self, key: &str) -> Result<u16> {
+    pub fn checkpoint(&self, key: &str) -> Result<Checkpoint> {
         let source = self.sources.get(key).context("Unknown audio source")?;
-        Ok(source.next as u16)
+        ensure!(
+            source.complete(),
+            "Cannot checkpoint incomplete source={key}"
+        );
+        Ok(Checkpoint {
+            epoch: source.epoch.to_string(),
+            position: source.next,
+        })
+    }
+    pub fn current_checkpoint(&self, checkpoint: &Checkpoint) -> bool {
+        checkpoint.epoch == self.epoch.to_string()
     }
     /// Startup boundary only. Reconnecting must keep both sources and cursors.
     pub fn reset(&mut self, index: u16) -> Result<()> {
@@ -136,18 +171,19 @@ impl Recordings {
         self.high_water = Some(position);
         self.boundary = Some(position);
         self.available_start = None;
+        self.last_range = None;
         self.released.clear();
         self.released_order.clear();
         Ok(())
     }
-    pub fn add(&mut self, index: u16, raw: &[u8], output: &Output) -> Result<Vec<Part>> {
+    pub fn add(&mut self, index: u16, raw: &[u8], output: &Output) -> Result<Received> {
         ensure!(raw.len() <= 655360, "Collection exceeds receive size limit");
         let position = self.position(index);
         if self.available_start.is_some_and(|start| position < start) {
             output.debug(format!(
                 "Skipping expired collection={index}; position={position}"
             ));
-            return Ok(vec![]);
+            return Ok(Received::default());
         }
         let item = decode(raw)?; // One TLV pass; diagnostics and gestures reuse its headers.
         let (first, origin) = if item.multipart {
@@ -170,13 +206,13 @@ impl Recordings {
             output.debug(format!(
                 "Skipping pre-start source={key} collection={index}"
             ));
-            return Ok(vec![]);
+            return Ok(Received::default());
         }
         if self.released.contains(&key) {
             output.debug(format!(
                 "Ignoring replay of retired source={key} collection={index}"
             ));
-            return Ok(vec![]);
+            return Ok(Received::default());
         }
         let digest: [u8; 32] = Sha256::digest(raw).into();
         let final_part = !item.multipart || item.final_part;
@@ -195,12 +231,8 @@ impl Recordings {
                 output.debug(format!(
                     "Ignoring duplicate source={key} collection={index}"
                 ));
-                return Ok(vec![]);
+                return Ok(Received::default());
             }
-            ensure!(
-                !source.lost,
-                "Source {key} already has an unrecoverable gap"
-            );
             ensure!(
                 source.final_at.is_none_or(|end| position <= end),
                 "Audio after final source={key}"
@@ -239,6 +271,7 @@ impl Recordings {
         );
         log_collection(index, &key, raw.len(), &item, output);
         let source = self.sources.entry(key.clone()).or_insert_with(|| Source {
+            epoch: self.epoch,
             first,
             next: first,
             rate: None,
@@ -268,8 +301,18 @@ impl Recordings {
         self.samples += count;
         self.collections += 1;
         self.high_water = Some(self.high_water.map_or(position, |high| high.max(position)));
+        if !source.lost
+            && self
+                .available_start
+                .is_some_and(|start| source.next < start)
+        {
+            source.lost = true;
+            output.error(format!("Source {key} starts before the available ring range; missing collection={}; retaining {} samples without recognizing incomplete audio", source.next as u16, source.samples));
+        }
         let mut ready = vec![];
-        while let Some(stored) = source.parts.get(&source.next) {
+        while !source.lost
+            && let Some(stored) = source.parts.get(&source.next)
+        {
             let mut part = stored.part.clone();
             // Metadata-only prefixes do not establish a sample rate.
             part.rate = source.rate.unwrap_or(16000);
@@ -279,7 +322,11 @@ impl Recordings {
         }
         self.pending = self.pending - old_pending + source.pending();
         output.debug(format!("PCM store source={key} retained_samples={} source_samples={} collections={} pending={} complete={}", self.samples, source.samples, self.collections, self.pending, source.complete()));
-        Ok(ready)
+        Ok(Received {
+            parts: ready,
+            source: Some(key),
+            lost: source.lost,
+        })
     }
     /// Return shared blocks only when every collection through final is present.
     #[cfg(test)]
@@ -307,22 +354,56 @@ impl Recordings {
     }
     /// A ring eviction is an error, not successful completion. Already retained
     /// PCM remains available until the session owner explicitly releases it.
-    pub fn retain(&mut self, start: u16, end: u16, output: &Output) -> Vec<String> {
-        let end_position = self.position(end);
-        let start_position = end_position.saturating_sub(u64::from(end.wrapping_sub(start)));
-        self.available_start = Some(
-            self.available_start
-                .map_or(start_position, |old| old.max(start_position)),
+    pub fn retain(&mut self, start: u16, end: u16, output: &Output) -> Result<RangeUpdate> {
+        let count = u64::from(end.wrapping_sub(start));
+        ensure!(count <= 512, "Invalid collection range");
+        let mut end_position = self.position(end);
+        let mut start_position = end_position - count;
+        // A normal u16 wrap advances by a small positive delta. A regression
+        // cannot share source IDs, gesture prefixes or save cursors with the
+        // previous range. This detects discontinuity, not its physical cause.
+        let discontinuity = self.last_range.map_or_else(
+            || self.high_water.is_some_and(|high| end_position < high),
+            |(old_start, old_end)| {
+                pebble_index::reception::scheduler::range_regressed(
+                    (old_start as u16, old_end as u16),
+                    (start, end),
+                )
+            },
         );
+        if discontinuity {
+            let previous = self.epoch;
+            self.epoch = uuid::Uuid::new_v4();
+            end_position = (self.high_water.unwrap_or(0) / 65536 + 2) * 65536 + u64::from(end);
+            start_position = end_position - count;
+            // This is not a startup flush. A new source whose prefix is already
+            // missing must be reported as lost, not silently skipped.
+            self.boundary = None;
+            output.error(format!("Ring counter discontinuity: previous_range={:?} range={start}..{end} epoch={previous}->{}; separating audio and checkpoints", self.last_range, self.epoch));
+        }
+        self.high_water = Some(
+            self.high_water
+                .map_or(end_position, |old| old.max(end_position)),
+        );
+        self.last_range = Some((start_position, end_position));
+        self.available_start = Some(start_position);
         let mut lost = vec![];
         for (key, source) in &mut self.sources {
-            if !source.complete() && !source.lost && source.next < start_position {
+            if !source.complete()
+                && !source.lost
+                && (source.epoch != self.epoch || source.next < start_position)
+            {
                 source.lost = true;
                 output.error(format!("Source {key} is incomplete: collection {} is no longer available in ring range {start}..{end}; retaining {} samples", source.next as u16, source.samples));
                 lost.push(key.clone());
             }
         }
-        lost
+        Ok(RangeUpdate {
+            start: start_position,
+            end: end_position,
+            discontinuity,
+            lost,
+        })
     }
 }
 impl pebble_index::reception::input_effects::AudioStore for Recordings {
@@ -373,6 +454,110 @@ mod tests {
     use super::*;
     fn output() -> Output {
         Output::new(false, None).unwrap()
+    }
+    #[test]
+    fn range_wrap_preserves_epoch_and_initial_fetch_orders_wrapped_collections() {
+        let out = output();
+        let mut store = Recordings::new("wrapped-ring");
+        let before = store.epoch;
+        let range = store.retain(65535, 1, &out).unwrap();
+        assert!(!range.discontinuity);
+        assert_eq!(range.end - range.start, 2);
+        let first = store.add(65535, &chunk(65535, false, &[1]), &out).unwrap();
+        let key = first.source.unwrap();
+        store.add(0, &chunk(65535, true, &[2]), &out).unwrap();
+        assert_eq!(samples(&store.whole(&key).unwrap()), [1, 2]);
+        assert!(!store.retain(0, 2, &out).unwrap().discontinuity);
+        assert_eq!(store.epoch, before);
+        assert!(store.current_checkpoint(&store.checkpoint(&key).unwrap()));
+    }
+
+    #[test]
+    fn regressed_range_keeps_old_whole_audio_and_isolates_reused_source_ids_and_checkpoints() {
+        let out = output();
+        let mut store = Recordings::new("reset-ring");
+        store.reset(1).unwrap();
+        store.retain(1, 4, &out).unwrap();
+        let old = store
+            .add(1, &chunk(1, true, &[1, 2]), &out)
+            .unwrap()
+            .source
+            .unwrap();
+        let pending = store
+            .add(2, &chunk(2, false, &[3]), &out)
+            .unwrap()
+            .source
+            .unwrap();
+        let checkpoint = store.checkpoint(&old).unwrap();
+        let range = store.retain(1, 2, &out).unwrap();
+        assert!(range.discontinuity);
+        assert_eq!(range.lost, std::slice::from_ref(&pending));
+        assert!(range.start > checkpoint.position);
+        assert!(!store.current_checkpoint(&checkpoint));
+        assert_eq!(samples(&store.whole(&old).unwrap()), [1, 2]);
+        assert!(store.whole(&pending).is_err());
+        assert_eq!(store.sources[&pending].samples, 1);
+        let new = store
+            .add(1, &chunk(1, true, &[9]), &out)
+            .unwrap()
+            .source
+            .unwrap();
+        assert_ne!(old, new);
+        assert_eq!(samples(&store.whole(&new).unwrap()), [9]);
+        assert!(store.current_checkpoint(&store.checkpoint(&new).unwrap()));
+        store.release(&old);
+        assert_eq!(samples(&store.whole(&new).unwrap()), [9]);
+    }
+
+    #[test]
+    fn lost_source_retains_late_tail_without_blocking_the_next_recording() {
+        let out = output();
+        let mut store = Recordings::new("evicted-ring");
+        store.reset(1).unwrap();
+        store.retain(1, 3, &out).unwrap();
+        let key = store
+            .add(1, &chunk(1, false, &[1]), &out)
+            .unwrap()
+            .source
+            .unwrap();
+        assert_eq!(
+            store.retain(3, 5, &out).unwrap().lost,
+            std::slice::from_ref(&key)
+        );
+        let tail = store.add(3, &chunk(1, true, &[3]), &out).unwrap();
+        assert_eq!(tail.source.as_deref(), Some(key.as_str()));
+        assert!(tail.lost);
+        assert!(tail.parts.is_empty());
+        assert_eq!(store.sources[&key].samples, 2);
+        assert!(store.whole(&key).is_err());
+        let next = store
+            .add(4, &chunk(4, true, &[4]), &out)
+            .unwrap()
+            .source
+            .unwrap();
+        assert_eq!(samples(&store.whole(&next).unwrap()), [4]);
+        assert!(
+            store
+                .add(3, &chunk(1, true, &[3]), &out)
+                .unwrap()
+                .source
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn a_source_first_seen_after_its_prefix_was_evicted_is_owned_and_failed() {
+        let out = output();
+        let mut store = Recordings::new("missing-prefix-ring");
+        store.reset(1).unwrap();
+        store.retain(3, 4, &out).unwrap();
+        let tail = store.add(3, &chunk(1, true, &[3]), &out).unwrap();
+        assert!(tail.lost);
+        assert!(tail.parts.is_empty());
+        let key = tail.source.unwrap();
+        assert!(!store.observation(&key, None).unwrap().complete);
+        assert_eq!(store.sources[&key].samples, 1);
+        assert!(store.checkpoint(&key).is_err());
     }
     fn wire(
         start: u32,
@@ -434,6 +619,7 @@ mod tests {
         let part = store
             .add(10, &chunk(10, false, &vec![1; 2000]), &out)
             .unwrap()
+            .parts
             .remove(0);
         let key = part.key;
         let observation = |store: &Recordings| {
@@ -528,17 +714,19 @@ mod tests {
         let first = store
             .add(10, &chunk(10, false, &[1, 2]), &out)
             .unwrap()
+            .parts
             .remove(0);
         let key = first.key;
         assert!(
             store
                 .add(12, &wire(10, true, true, None, 0, Some((1, 1))), &out)
                 .unwrap()
+                .parts
                 .is_empty()
         );
         assert!(store.whole(&key).is_err());
         assert_eq!(store.pending, 1);
-        let ready = store.add(11, &chunk(10, false, &[3]), &out).unwrap();
+        let ready = store.add(11, &chunk(10, false, &[3]), &out).unwrap().parts;
         assert_eq!(
             ready
                 .iter()
@@ -556,12 +744,12 @@ mod tests {
         let mut store = Recordings::default();
         let out = output();
         let raw = chunk(2, true, &[23]);
-        let part = store.add(2, &raw, &out).unwrap().remove(0);
-        assert!(store.add(2, &raw, &out).unwrap().is_empty());
+        let part = store.add(2, &raw, &out).unwrap().parts.remove(0);
+        assert!(store.add(2, &raw, &out).unwrap().parts.is_empty());
         assert_eq!(store.samples, 1);
         store.release(&part.key);
         assert!(store.sources.is_empty());
-        assert!(store.add(2, &raw, &out).unwrap().is_empty());
+        assert!(store.add(2, &raw, &out).unwrap().parts.is_empty());
         assert_eq!(store.samples, 0);
         // Releasing the receive owner cannot invalidate an in-flight consumer.
         assert_eq!(samples(&part.samples), [23]);
@@ -573,12 +761,18 @@ mod tests {
         let old = store
             .add(4, &chunk(4, false, &[1]), &out)
             .unwrap()
+            .parts
             .remove(0);
         let new = store
             .add(6, &chunk(6, false, &[9]), &out)
             .unwrap()
+            .parts
             .remove(0);
-        let old_final = store.add(5, &chunk(4, true, &[2]), &out).unwrap().remove(0);
+        let old_final = store
+            .add(5, &chunk(4, true, &[2]), &out)
+            .unwrap()
+            .parts
+            .remove(0);
         assert_eq!(old.key, old_final.key);
         assert_ne!(old.key, new.key);
         let whole = store.whole(&old.key).unwrap();
@@ -592,6 +786,7 @@ mod tests {
         let other = other
             .add(4, &chunk(4, false, &[1]), &out)
             .unwrap()
+            .parts
             .remove(0);
         assert_ne!(old.key, other.key, "continuity epochs must not alias");
     }
@@ -606,12 +801,14 @@ mod tests {
                 &out,
             )
             .unwrap()
+            .parts
             .remove(0);
         assert_eq!(samples(&a.samples), [7]);
         assert_eq!(a.buttons.as_deref(), Some(["short".to_owned()].as_slice()));
         let b = store
             .add(2, &wire(2, false, true, None, 0, Some((0, 2))), &out)
             .unwrap()
+            .parts
             .remove(0);
         assert!(b.final_part && b.samples.is_empty());
         assert_ne!(a.key, b.key);
@@ -623,10 +820,12 @@ mod tests {
         let prefix = store
             .add(9, &wire(9, true, false, None, 0, Some((0, 1))), &out)
             .unwrap()
+            .parts
             .remove(0);
         let end = store
             .add(10, &chunk(9, true, &[5]), &out)
             .unwrap()
+            .parts
             .remove(0);
         assert_eq!(prefix.key, end.key);
         assert_eq!(end.rate, 9997);
@@ -639,6 +838,7 @@ mod tests {
         let a = store
             .add(20, &chunk(20, false, &[1]), &out)
             .unwrap()
+            .parts
             .remove(0);
         assert!(store.add(20, &chunk(20, false, &[2]), &out).is_err());
         assert!(
@@ -672,13 +872,14 @@ mod tests {
         let a = store
             .add(1, &chunk(1, false, &[1, 2]), &out)
             .unwrap()
+            .parts
             .remove(0);
         assert!(store.add(2, &chunk(1, false, &[3]), &out).is_err());
         assert_eq!(store.samples, 2);
         store.add(2, &chunk(1, true, &[]), &out).unwrap();
         assert!(store.add(3, &chunk(3, true, &[4]), &out).is_err());
         store.release(&a.key);
-        let b = store.add(3, &chunk(3, true, &[4]), &out).unwrap();
+        let b = store.add(3, &chunk(3, true, &[4]), &out).unwrap().parts;
         assert_eq!(samples(&b[0].samples), [4]);
     }
     #[test]
@@ -690,11 +891,19 @@ mod tests {
             store
                 .add(2, &chunk(0, true, &[3]), &out)
                 .unwrap()
+                .parts
                 .is_empty()
         );
         assert!(store.add(1, &chunk(0, false, &[2]), &out).is_err());
-        assert_eq!(store.add(0, &chunk(0, false, &[1]), &out).unwrap().len(), 1);
-        let rest = store.add(1, &chunk(0, false, &[2]), &out).unwrap();
+        assert_eq!(
+            store
+                .add(0, &chunk(0, false, &[1]), &out)
+                .unwrap()
+                .parts
+                .len(),
+            1
+        );
+        let rest = store.add(1, &chunk(0, false, &[2]), &out).unwrap().parts;
         assert_eq!(rest.len(), 2);
         assert!(rest[1].final_part);
         assert_eq!(store.pending, 0);
@@ -706,10 +915,14 @@ mod tests {
         let a = store
             .add(10, &chunk(10, false, &[1]), &out)
             .unwrap()
+            .parts
             .remove(0);
         store.add(12, &chunk(10, true, &[3]), &out).unwrap();
-        assert_eq!(store.retain(12, 13, &out), std::slice::from_ref(&a.key));
-        assert!(store.retain(12, 13, &out).is_empty());
+        assert_eq!(
+            store.retain(12, 13, &out).unwrap().lost,
+            std::slice::from_ref(&a.key)
+        );
+        assert!(store.retain(12, 13, &out).unwrap().lost.is_empty());
         assert_eq!(store.samples, 2);
         assert!(store.whole(&a.key).is_err());
         assert!(store.reset(13).is_err());
@@ -725,6 +938,7 @@ mod tests {
         let first = store
             .add(0, &wire(0, false, true, Some(&[1]), 9997, None), &out)
             .unwrap()
+            .parts
             .remove(0);
         for index in [32767, 65534] {
             store
@@ -738,6 +952,7 @@ mod tests {
         let next_cycle = store
             .add(0, &wire(65536, false, true, Some(&[3]), 9997, None), &out)
             .unwrap()
+            .parts
             .remove(0);
         assert_ne!(first.key, next_cycle.key);
         assert_eq!(samples(&store.whole(&first.key).unwrap()), [1]);

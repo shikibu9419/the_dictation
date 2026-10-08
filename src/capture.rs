@@ -9,7 +9,7 @@ use anyhow::{Context, Result};
 use base64::{Engine, engine::general_purpose::STANDARD};
 use pebble_index::ipc;
 use pebble_index::reception::connection::{ConnectionPolicy, WatchReason};
-use pebble_index::reception::scheduler::{Decision, Request, Scheduler};
+use pebble_index::reception::scheduler::{Decision, Request, Scheduler, range_regressed};
 use serde_json::{Value, json};
 use std::{
     collections::HashMap,
@@ -23,7 +23,7 @@ struct Received {
     outbound: Option<ipc::Sender<Value>>,
     output: Output,
     collecting: Option<bool>,
-    range_end: Option<u16>,
+    last_range: Option<(u16, u16)>,
     last_state: Option<RingState>,
     last_advertisement: Option<String>,
     connection: ConnectionPolicy,
@@ -62,12 +62,23 @@ impl Received {
     fn millis(&self) -> u64 {
         self.observation_origin.elapsed().as_millis() as u64
     }
-    fn range(&mut self, start: u16, end: u16) -> Result<()> {
-        if self.range_end.is_some_and(|old| old != end) {
+    fn range(&mut self, start: u16, end: u16) -> Result<bool> {
+        let discontinuity = self
+            .last_range
+            .is_some_and(|old| range_regressed(old, (start, end)));
+        if discontinuity {
+            self.output.error(format!(
+                "BLE ring range regressed {:?}->{start}..{end}; receive cursor {:?}->{start}",
+                self.last_range, self.next
+            ));
+            self.next = Some(start);
+        }
+        if self.last_range.is_some_and(|(_, old)| old != end) {
             self.connection.activity(self.millis());
         }
-        self.range_end = Some(end);
-        self.send(json!({"type":"range","start":start,"end":end}))
+        self.last_range = Some((start, end));
+        self.send(json!({"type":"range","start":start,"end":end}))?;
+        Ok(discontinuity)
     }
     fn state(&mut self, state: &RingState) -> Result<()> {
         if state.in_collection_state
@@ -84,7 +95,7 @@ impl Received {
             .observe(state.in_collection_state, &self.output);
         self.send(
             json!({"type":"button_state","pressed":state.in_collection_state,"unread":self.next,
-                "range_pending":self.range_end.is_some_and(|end| state.collection_count != end as u8)}),
+                "range_pending":self.last_range.is_some_and(|(_, end)| state.collection_count != end as u8)}),
         )?;
         if self.collecting != Some(state.in_collection_state) {
             self.output.debug(format!(
@@ -173,7 +184,11 @@ async fn download(
         output.line("BLE接続・初期化完了。録音中ならそのまま話し続けてください。");
         output.debug(format!("Startup flush: skipped existing collections {start}..{}; active recording preserved={}",received.next.unwrap(),received.next!=Some(end)));
     }
-    received.range(start, end)?;
+    if received.range(start, end)? {
+        state_started = received.millis();
+        state = received.read(ble.state(args.timeout)).await?;
+        received.state(&state)?;
+    }
     // This initial R may precede the second startup S. Preserve its count hint
     // without guessing a full counter value from eight bits.
     if state.collection_count != end as u8 {
@@ -243,7 +258,9 @@ async fn download(
             Request::Range => {
                 let (start, end) = received.read(ble.range(args.timeout)).await?;
                 scheduler.range(start, end)?;
-                received.range(start, end)?;
+                if received.range(start, end)? {
+                    cached.clear();
+                }
                 received.next = Some(scheduler.cursor());
                 output.debug(format!(
                     "Collection range: {start}..{end}; downloading from {}",
@@ -314,7 +331,7 @@ async fn receive_with_bridge(
         outbound,
         output: output.clone(),
         collecting: None,
-        range_end: None,
+        last_range: None,
         last_state: None,
         last_advertisement: None,
         connection: ConnectionPolicy::default(),
@@ -627,7 +644,7 @@ BEGIN { print "{\"type\":\"ready\"}"; fflush() }
             outbound: Some(tx),
             output: Output::new(false, None).unwrap(),
             collecting: None,
-            range_end: None,
+            last_range: None,
             last_state: None,
             last_advertisement: None,
             connection: ConnectionPolicy::default(),
@@ -659,6 +676,14 @@ BEGIN { print "{\"type\":\"ready\"}"; fflush() }
             clock |= event["type"] == "clock";
         }
         assert!(clock);
+        // Received survives reconnects, whereas Scheduler is constructed anew.
+        // A cursor inside the new regressed range must still return to its start.
+        received.next = Some(2);
+        assert!(!received.range(1, 4).unwrap());
+        assert!(received.range(1, 2).unwrap());
+        assert_eq!(received.next, Some(1));
+        assert!(!received.range(1, 3).unwrap());
+        assert_eq!(received.next, Some(1));
     }
     #[test]
     fn ble_state_emits_edges_before_audio_and_preserves_worker_updates() {
@@ -674,7 +699,7 @@ BEGIN { print "{\"type\":\"ready\"}"; fflush() }
             outbound: Some(tx),
             output,
             collecting: None,
-            range_end: None,
+            last_range: None,
             last_state: None,
             last_advertisement: None,
             connection: ConnectionPolicy::default(),

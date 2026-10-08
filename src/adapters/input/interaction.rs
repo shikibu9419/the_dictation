@@ -4,7 +4,11 @@ use super::{
     gesture_types::{Gesture, GestureEvent},
     gestures::{Hooks, LogHook},
 };
-use crate::{output::Output, recordings::Recordings, settings::Settings};
+use crate::{
+    output::Output,
+    recordings::{Checkpoint, Recordings},
+    settings::Settings,
+};
 use anyhow::{Context, Result, ensure};
 use pebble_index::reception::{
     input_effects::{Effect, InputEffects},
@@ -21,7 +25,7 @@ pub struct Interaction {
     namespace: String,
     live_enabled: bool,
     // Release acknowledgement is per logical recording, never the latest press.
-    checkpoints: HashMap<SessionId, u16>,
+    checkpoints: HashMap<SessionId, Checkpoint>,
     last_snapshot: Option<pebble_index::reception::session_state::Snapshot>,
 }
 impl Interaction {
@@ -92,13 +96,13 @@ impl Interaction {
                         let last = sources
                             .last()
                             .context("Cannot recognize a recording without sources")?;
-                        self.checkpoints.insert(*session, store.next_index(last)?);
+                        self.checkpoints.insert(*session, store.checkpoint(last)?);
                     }
                     Action::Retire { session, sources } => {
                         let checkpoint = self
                             .checkpoints
                             .remove(session)
-                            .or_else(|| sources.last().and_then(|s| store.next_index(s).ok()));
+                            .or_else(|| sources.last().and_then(|s| store.checkpoint(s).ok()));
                         for source in sources {
                             store.release(source);
                         }

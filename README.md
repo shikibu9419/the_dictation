@@ -152,6 +152,8 @@ On Deviceの全文認識中に次のlive入力が来た場合は、計算の区�
 - 受信音声はライブ認識へ逐次入力。録音終了を検出すると暫定結果の表示を停止し、残りの音声を回収します。
 - 録音全体が揃ったら、別の認識セッションへ0.5秒単位で連続入力し、最終全文をもう一度表示します。前の録音の最終認識中も、次の録音を受信できます。
 - 同じ起動中の切断は、未取得チャンクから再開します。アプリ再起動時は前回の未処理キューを引き継ぎません。
+- リング内から未取得チャンクが消えた録音は、欠落として表示・記録します。受信済みの音声は上限付きのメモリ内に保持し、後着の末尾を誤って完全な録音として認識しません。後続の独立した録音は処理できます。
+- リングの取得範囲が巻き戻った場合は受信世代を分け、古いジェスチャ待ちや保存位置を引き継ぎません。すでに音声が揃った旧録音の全文認識は継続します。通常の16bitカウンター周回では世代を変えません。番号だけでは区別できない完全一周やリセットの検出は保証しません。
 - MacのBluetoothがOFFでも待機を継続し、ONへの復帰通知から再接続します。Bluetooth補助プロセスの終了・応答停止・不正なIPCでは、そのプロセスだけを再起動します。受信位置と保持済み音声は維持し、起動時flushをやり直しません。理由・失敗段階・再接続までの時間は`--log`に残ります。
 - ASRの異常終了・応答停止時は、その認識ワーカーだけを再起動します。BLE受信と音声保持は継続し、処理中の録音を保持済みPCMから再送します。復旧中に終了したliveや古い世代は再開せず、全文認識には全音声を渡します。再起動が失敗し続ける場合は最大30秒まで間隔を空けて再試行し、理由・PID・再送範囲を`--log`へ記録します。
 - 通常のBLE使用では音声やチャンクをファイルに保存しません。
@@ -291,6 +293,12 @@ INDEX_VOICE_SPEECH_COMMAND=/absolute/path/to/speech-adapter cargo run --release 
 Rust側にTelesto転送・DDRiceデコード・録音結合・連続フィルター・プロセス監視・表示・HTTPサーバーを実装しています。`native/Bluetooth.swift`はCoreBluetoothの橋渡し、`native/AudioDecode.swift`はAVFoundationのデコード、`native/SpeechStream.swift`はSpeechAnalyzerを担当します。必要なソース・依存関係はこのプロジェクト内で完結しています。
 
 ```sh
+# 画面・BLE・マイクを起動しない回帰テスト
+cargo test --release --lib --bin pebble-index --bin index-voice \
+  --test adapters --test reception_pipeline --test ipc_limits \
+  --test qwen_numerics --test qwen_runtime --test qwen_worker_runtime
+
+# 全ターゲット（従来のGUI/BLE経路を扱うテストも含む）
 cargo test
 cargo clippy --all-targets -- -D warnings
 

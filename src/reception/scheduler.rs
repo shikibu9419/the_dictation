@@ -5,6 +5,14 @@ use anyhow::{Context, Result, ensure};
 
 const RANGE_INTERVAL_MS: u64 = 1_000;
 
+/// Wire counters are ordered within half a u16 cycle. Ordinary wrap is forward;
+/// a regression is a continuity boundary even if the old cursor is still inside
+/// the new range. Exact full-cycle/reboot aliases cannot be proved from R alone.
+pub fn range_regressed(previous: (u16, u16), current: (u16, u16)) -> bool {
+    (current.0.wrapping_sub(previous.0) as i16) < 0
+        || (current.1.wrapping_sub(previous.1) as i16) < 0
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Request {
     State,
@@ -26,6 +34,7 @@ pub struct Scheduler {
     period_ms: u64,
     state_due: u64,
     range_due: u64,
+    start: u16,
     end: u16,
     cursor: u16,
     range_needed: bool,
@@ -52,6 +61,7 @@ impl Scheduler {
             period_ms,
             state_due: state_started.saturating_add(period_ms),
             range_due: range_started.saturating_add(RANGE_INTERVAL_MS),
+            start,
             end,
             cursor: clamp_cursor(cursor, start, end),
             range_needed: observed_count != end as u8,
@@ -128,8 +138,15 @@ impl Scheduler {
         ensure!(end.wrapping_sub(start) <= 512, "Invalid collection range");
         let started = self.finish(Request::Range)?;
         self.range_due = started.saturating_add(RANGE_INTERVAL_MS);
+        self.cursor = if range_regressed((self.start, self.end), (start, end)) {
+            // Old cached S belongs to the previous counter generation.
+            self.state_due = started;
+            start
+        } else {
+            clamp_cursor(self.cursor, start, end)
+        };
+        self.start = start;
         self.end = end;
-        self.cursor = clamp_cursor(self.cursor, start, end);
         self.range_needed = false;
         self.state_since_work = false;
         self.last_work = Some(Request::Range);
@@ -157,6 +174,46 @@ fn clamp_cursor(cursor: u16, start: u16, end: u16) -> u16 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn regressed_range_rewinds_even_an_in_range_cursor_and_refreshes_state() {
+        let mut s = Scheduler::new(50, 0, 0, 1, 4, 2, 2).unwrap();
+        // Backlog drains before a count-triggered refresh; periodic R gets a turn.
+        assert!(matches!(
+            s.next(1000).unwrap(),
+            Decision::Read {
+                request: Request::State,
+                ..
+            }
+        ));
+        s.state(2, 1001).unwrap();
+        assert!(matches!(
+            s.next(1001).unwrap(),
+            Decision::Read {
+                request: Request::Range,
+                ..
+            }
+        ));
+        s.range(1, 2).unwrap();
+        assert_eq!(s.cursor(), 1); // Previous cursor 2 is inside the new range.
+        assert!(matches!(
+            s.next(1002).unwrap(),
+            Decision::Read {
+                request: Request::State,
+                ..
+            }
+        ));
+        s.state(2, 1003).unwrap();
+        assert!(matches!(
+            s.next(1003).unwrap(),
+            Decision::Read {
+                request: Request::Collection(1),
+                ..
+            }
+        ));
+        assert!(!range_regressed((65534, 65535), (65535, 1)));
+        assert!(range_regressed((20, 24), (1, 3)));
+    }
 
     fn read(s: &mut Scheduler, now: u64) -> Request {
         match s.next(now).unwrap() {

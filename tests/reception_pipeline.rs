@@ -160,6 +160,103 @@ fn batch_sizes(dir: &Path) -> Vec<usize> {
 }
 
 #[tokio::test]
+async fn counter_reset_preserves_pending_whole_audio_and_ignores_its_old_checkpoint() {
+    let dir = tempfile::tempdir().unwrap();
+    let script = r#"#!/bin/sh
+printf '{"type":"ready"}\n'
+while IFS= read -r line; do
+printf '%s\t%s\n' "$2" "$line" >> "$ENGINE_LOG"
+case "$line" in
+*'"type":"audio"'*) printf '{"type":"accepted"}\n';;
+*'"type":"finish"'*)
+while [ ! -e "$ENGINE_LOG.release" ]; do sleep 0.01; done
+printf '{"type":"final","text":"whole recording"}\n';;
+*'"type":"cancel"'*) printf '{"type":"cancelled"}\n';;
+esac
+done
+"#;
+    let mut w = Worker::with_engine(dir.path(), false, script).await;
+    w.send(1, json!({"type":"range","start":1,"end":4})).await;
+    w.send(2, collection(1, 1, false, 100, 0, 0)).await;
+    w.send(3, collection(2, 1, false, 100, 0, 0)).await;
+    w.send(4, collection(3, 1, true, 23, 1, 1)).await;
+    w.send(54, json!({"type":"clock"})).await;
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while batch_sizes(dir.path()).is_empty() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    w.send(60, json!({"type":"range","start":1,"end":2})).await;
+    w.send(61, json!({"type":"button_state","pressed":true,"unread":1}))
+        .await;
+    w.send(111, json!({"type":"clock"})).await;
+    w.until(|v| v["type"] == "reception_activity").await;
+    w.send(120, collection(1, 1, true, 17, 1, 1)).await;
+    w.send(170, json!({"type":"clock"})).await;
+    std::fs::write(dir.path().join("engine.log.release"), []).unwrap();
+    w.send(171, json!({"type":"flush"})).await;
+    w.until(|v| v["type"] == "flushed").await;
+    let finals: Vec<_> = w
+        .events
+        .iter()
+        .filter(|v| v["type"] == "text" && v["final"] == true)
+        .collect();
+    assert_eq!(finals.len(), 2);
+    assert_ne!(finals[0]["recording"], finals[1]["recording"]);
+    assert_eq!(batch_sizes(dir.path()), [223, 17]);
+    let cursor = std::fs::read_dir(dir.path().join("pebble-index-rust"))
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .find(|p| {
+            p.file_name()
+                .unwrap()
+                .to_string_lossy()
+                .starts_with("cursor-")
+        })
+        .unwrap();
+    assert_eq!(
+        serde_json::from_slice::<Value>(&std::fs::read(cursor).unwrap()).unwrap()["next_index"],
+        2
+    );
+    w.close().await;
+}
+
+#[tokio::test]
+async fn evicted_prefix_and_late_final_do_not_stop_a_following_complete_recording() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut w = Worker::new(dir.path(), false).await;
+    w.send(1, json!({"type":"range","start":3,"end":5})).await;
+    w.send(2, collection(3, 1, false, 100, 0, 0)).await;
+    let lost = w.until(|v| v["type"] == "discarded").await;
+    w.send(3, collection(4, 1, true, 23, 1, 1)).await;
+    w.send(4, json!({"type":"range","start":3,"end":6})).await;
+    w.send(5, json!({"type":"button_state","pressed":true,"unread":5}))
+        .await;
+    w.send(6, collection(5, 5, true, 17, 3, 2)).await;
+    w.send(56, json!({"type":"clock"})).await;
+    let complete = w.until(|v| v["type"] == "text" && v["final"] == true).await;
+    assert_ne!(lost["recording"], complete["recording"]);
+    assert_eq!(batch_sizes(dir.path()), [17]);
+    assert!(!w.events.iter().any(|v| v["type"] == "gesture"));
+    // The lost source is still an error at EOF, never a fabricated success.
+    drop(w.input.take());
+    let mut reported_loss = false;
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while let Some(line) = w.output.next_line().await.unwrap() {
+            let value: Value = serde_json::from_str(&line).unwrap();
+            assert_ne!(value["type"], "flushed");
+            reported_loss |= value["type"] == "error";
+        }
+        assert!(!w.child.wait().await.unwrap().success());
+    })
+    .await
+    .unwrap();
+    assert!(reported_loss);
+}
+
+#[tokio::test]
 async fn eof_drains_complete_audio_persists_its_checkpoint_and_closes_both_engines() {
     let dir = tempfile::tempdir().unwrap();
     let mut script = failing_engine("never", "never").replace(

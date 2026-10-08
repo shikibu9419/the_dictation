@@ -65,6 +65,102 @@ fn start_long(m: &mut SessionState) -> SessionId {
 }
 
 #[test]
+fn counter_discontinuity_cannot_merge_holds_or_fire_an_old_pending_tap() {
+    let mut m = SessionState::default();
+    audio(&mut m, 0, "tap", 1, Some(Press::Short), true);
+    state(&mut m, 20, true, 2); // Accepted prefix, still no classified audio.
+    let t = m
+        .observe(25, Observation::Discontinuity { unread: 65537 })
+        .unwrap();
+    assert!(t.sessions.is_empty());
+    assert!(gestures(&t).is_empty());
+    let new = state(&mut m, 30, true, 65537).snapshot.session_id.unwrap();
+    assert_eq!(m.snapshot().prefix, None);
+    audio(&mut m, 40, "new", 65537, Some(Press::Long), true);
+    let t = m.tick(90).unwrap();
+    assert_eq!(gestures(&t), [Gesture::LongHold]);
+    assert_eq!(batches(&t), [(new, vec!["new".into()])]);
+}
+
+#[test]
+fn discontinuity_keeps_submitted_and_complete_audio_but_fails_incomplete_audio() {
+    let mut m = SessionState::default();
+    audio(&mut m, 0, "submitted", 1, Some(Press::Long), true);
+    let submitted = batches(&m.tick(50).unwrap())[0].0;
+    audio(&mut m, 51, "ready", 2, Some(Press::Long), true);
+    let ready = m.source_session("ready").unwrap();
+    state(&mut m, 52, true, 3);
+    audio(&mut m, 53, "incomplete", 3, None, false);
+    let incomplete = m.source_session("incomplete").unwrap();
+    let t = m
+        .observe(54, Observation::Discontinuity { unread: 65537 })
+        .unwrap();
+    assert!(t.sessions.iter().any(|s| s.id == submitted && !s.failed));
+    assert!(t.sessions.iter().any(|s| s.id == ready && !s.failed));
+    assert!(
+        t.sessions
+            .iter()
+            .any(|s| s.id == incomplete && s.failed && !s.live)
+    );
+    assert!(batches(&t).is_empty());
+    assert_eq!(
+        batches(&m.tick(101).unwrap()),
+        [(ready, vec!["ready".into()])]
+    );
+    let t = m.observe(102, Observation::Recognized(submitted)).unwrap();
+    assert!(!t.sessions.iter().any(|s| s.id == submitted));
+    assert!(t.sessions.iter().any(|s| s.id == ready));
+}
+
+#[test]
+fn losing_a_parent_detaches_its_provisional_child_before_new_audio_arrives() {
+    let mut m = SessionState::default();
+    let parent = start_long(&mut m);
+    state(&mut m, 100, false, 2);
+    state(&mut m, 120, true, 2);
+    let t = m.observe(125, Observation::Lost("a".into())).unwrap();
+    let child = t.snapshot.session_id.unwrap();
+    assert_ne!(child, parent);
+    audio(&mut m, 130, "child", 2, Some(Press::Long), true);
+    let t = m.tick(180).unwrap();
+    assert_eq!(batches(&t), [(child, vec!["child".into()])]);
+    assert!(t.sessions.iter().any(|s| s.id == parent && s.failed));
+}
+
+#[test]
+fn a_new_lost_source_emits_no_live_or_batch_even_with_short_metadata() {
+    let mut m = SessionState::default();
+    state(&mut m, 0, true, 3); // First available C; the prefix is already gone.
+    let t = m
+        .observe(
+            60,
+            Observation::LostSource(SourceObservation {
+                id: "lost".into(),
+                first_collection: 1,
+                last_collection: 3,
+                classification: Some(Press::Short),
+                final_seen: true,
+                complete: false,
+            }),
+        )
+        .unwrap();
+    assert!(t.sessions[0].failed);
+    assert!(!t.sessions[0].live);
+    assert!(gestures(&t).is_empty());
+    assert!(batches(&t).is_empty());
+    let failed = t.sessions[0].id;
+    assert_eq!(t.sessions.len(), 1);
+    let t = state(&mut m, 100, true, 4);
+    assert_eq!(t.sessions.len(), 1);
+    assert_eq!(t.sessions[0].id, failed);
+    state(&mut m, 110, false, 4);
+    assert_ne!(
+        state(&mut m, 120, true, 4).snapshot.session_id,
+        Some(failed)
+    );
+}
+
+#[test]
 fn thirty_ms_short_never_shows_or_recognizes_and_hook_fires_once() {
     let mut m = SessionState::default();
     state(&mut m, 0, true, 1);
