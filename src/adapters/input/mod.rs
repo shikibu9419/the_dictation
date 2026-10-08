@@ -9,6 +9,7 @@ use crate::output::Output;
 use anyhow::Result;
 use serde_json::Value;
 
+#[derive(Clone)]
 pub struct AudioChunk {
     pub key: String,
     pub samples: crate::pcm::Pcm,

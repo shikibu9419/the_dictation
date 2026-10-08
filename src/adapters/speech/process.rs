@@ -81,6 +81,9 @@ impl ProcessEngine {
     }
 }
 impl SpeechEngine for ProcessEngine {
+    fn process_id(&self) -> Option<u32> {
+        self.helper.child.id()
+    }
     fn input_backlogged(&self) -> bool {
         self.native
             .as_ref()

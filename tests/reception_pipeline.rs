@@ -17,8 +17,7 @@ struct Worker {
 }
 impl Worker {
     async fn new(dir: &Path, live: bool) -> Self {
-        let engine = dir.join("mock-asr");
-        std::fs::write(&engine, r#"#!/bin/sh
+        Self::with_engine(dir, live, r#"#!/bin/sh
 printf '{"type":"ready"}\n'
 while IFS= read -r line; do
 printf '%s\t%s\n' "$2" "$line" >> "$ENGINE_LOG"
@@ -28,7 +27,11 @@ case "$line" in
 *'"type":"cancel"'*) printf '{"type":"cancelled"}\n';;
 esac
 done
-"#).unwrap();
+"#).await
+    }
+    async fn with_engine(dir: &Path, live: bool, script: &str) -> Self {
+        let engine = dir.join("mock-asr");
+        std::fs::write(&engine, script).unwrap();
         std::fs::set_permissions(&engine, std::fs::Permissions::from_mode(0o755)).unwrap();
         let config = dir.join("pebble-index-rust");
         std::fs::create_dir(&config).unwrap();
@@ -154,6 +157,305 @@ fn batch_sizes(dir: &Path) -> Vec<usize> {
         }
     }
     sizes
+}
+
+fn failing_engine(mode: &str, point: &str) -> String {
+    format!(
+        r#"#!/bin/sh
+mode="$2"
+count=0
+printf '%s\t{{"type":"test_start","pid":%s}}\n' "$mode" "$$" >> "$ENGINE_LOG"
+printf '{{"type":"ready"}}\n'
+while IFS= read -r line; do
+printf '%s\t%s\n' "$mode" "$line" >> "$ENGINE_LOG"
+case "$line" in
+*'"type":"audio"'*)
+  count=$((count + 1))
+  if [ "$mode" = '{mode}' ] && [ '{point}' = before_ack ] && [ "$count" = 2 ] && mkdir "$ENGINE_LOG.failed" 2>/dev/null; then exit 9; fi
+  printf '{{"type":"accepted"}}\n'
+  if [ "$mode" = live ]; then printf '{{"type":"partial","text":"live words"}}\n'; fi
+  if [ "$mode" = '{mode}' ] && [ '{point}' = after_ack ] && mkdir "$ENGINE_LOG.failed" 2>/dev/null; then exit 9; fi;;
+*'"type":"finish"'*)
+  if [ "$mode" = '{mode}' ] && [ '{point}' = finish ] && mkdir "$ENGINE_LOG.failed" 2>/dev/null; then exit 9; fi
+  printf '{{"type":"final","text":"whole recording"}}\n'
+  if [ "$mode" = '{mode}' ] && [ '{point}' = after_final ] && mkdir "$ENGINE_LOG.failed" 2>/dev/null; then exit 9; fi;;
+*'"type":"cancel"'*) printf '{{"type":"cancelled"}}\n';;
+esac
+done
+"#
+    )
+}
+
+fn attempts(dir: &Path, mode: &str) -> Vec<Vec<Value>> {
+    let mut attempts: Vec<Vec<Value>> = vec![];
+    for line in std::fs::read_to_string(dir.join("engine.log"))
+        .unwrap()
+        .lines()
+    {
+        let Some((role, value)) = line.split_once('\t') else {
+            continue;
+        };
+        if role != mode {
+            continue;
+        }
+        let value: Value = serde_json::from_str(value).unwrap();
+        if value["type"] == "test_start" {
+            attempts.push(vec![]);
+        } else {
+            attempts.last_mut().unwrap().push(value);
+        }
+    }
+    attempts
+}
+fn pcm_of(commands: &[Value]) -> Vec<u8> {
+    commands
+        .iter()
+        .filter(|v| v["type"] == "audio")
+        .flat_map(|v| STANDARD.decode(v["pcm"].as_str().unwrap()).unwrap())
+        .collect()
+}
+
+#[tokio::test]
+async fn eof_after_final_does_not_replay_or_emit_the_completed_recording_twice() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut w =
+        Worker::with_engine(dir.path(), false, &failing_engine("batch", "after_final")).await;
+    w.send(10, collection(1, 1, true, 351, 1, 1)).await;
+    w.send(60, json!({"type":"clock"})).await;
+    w.until(|v| v["type"] == "text" && v["mode"] == "batch")
+        .await;
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while attempts(dir.path(), "batch").len() < 2 {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .unwrap();
+    w.send(70, json!({"type":"flush"})).await;
+    w.until(|v| v["type"] == "flushed").await;
+    assert!(pcm_of(&attempts(dir.path(), "batch")[1]).is_empty());
+    assert_eq!(
+        w.events
+            .iter()
+            .filter(|v| v["type"] == "text" && v["mode"] == "batch")
+            .count(),
+        1
+    );
+    w.close().await;
+}
+
+#[tokio::test]
+async fn a_failed_restart_attempt_keeps_the_pending_full_recording() {
+    let dir = tempfile::tempdir().unwrap();
+    let script = failing_engine("batch", "finish").replace(
+        "printf '{\"type\":\"ready\"}\\n'",
+        "if [ -d \"$ENGINE_LOG.failed\" ] && mkdir \"$ENGINE_LOG.boot-failed\" 2>/dev/null; then printf '{\"type\":\"error\",\"text\":\"synthetic startup failure\"}\\n'; exit 8; fi\nprintf '{\"type\":\"ready\"}\\n'",
+    );
+    assert!(script.contains("synthetic startup failure"));
+    let mut w = Worker::with_engine(dir.path(), false, &script).await;
+    w.send(10, collection(1, 1, true, 351, 1, 1)).await;
+    w.send(60, json!({"type":"clock"})).await;
+    let text = w
+        .until(|v| v["type"] == "text" && v["mode"] == "batch")
+        .await;
+    assert_eq!(text["audio_seconds"], 0.351);
+    w.send(100, collection(2, 2, true, 4, 1, 2)).await;
+    w.send(150, json!({"type":"clock"})).await;
+    assert_eq!(
+        w.until(|v| v["type"] == "gesture").await["gesture"],
+        "single_tap"
+    );
+    w.send(160, json!({"type":"flush"})).await;
+    w.until(|v| v["type"] == "flushed").await;
+    let batch = attempts(dir.path(), "batch");
+    assert_eq!(batch.len(), 3);
+    assert_eq!(pcm_of(&batch[0]), pcm_of(&batch[2]));
+    assert!(pcm_of(&batch[1]).is_empty());
+    assert_eq!(
+        w.events
+            .iter()
+            .filter(|v| v["type"] == "text" && v["mode"] == "batch")
+            .count(),
+        1
+    );
+    w.close().await;
+}
+
+#[tokio::test]
+async fn release_during_model_restart_skips_old_live_replay_but_preserves_the_full_batch() {
+    let dir = tempfile::tempdir().unwrap();
+    let script = failing_engine("live", "before_ack").replace(
+        "printf '{\"type\":\"ready\"}\\n'",
+        "if [ \"$mode\" = live ] && [ -d \"$ENGINE_LOG.failed\" ]; then sleep 0.2; fi\nprintf '{\"type\":\"ready\"}\\n'",
+    );
+    assert!(script.contains("sleep 0.2"));
+    let mut w = Worker::with_engine(dir.path(), true, &script).await;
+    w.send(1, json!({"type":"button_state","pressed":true,"unread":1}))
+        .await;
+    w.send(51, json!({"type":"clock"})).await;
+    w.send(60, collection(1, 1, false, 250, 0, 0)).await;
+    w.until(|v| v["type"] == "text" && v["mode"] == "live")
+        .await;
+    w.send(80, collection(2, 1, false, 250, 0, 0)).await;
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while attempts(dir.path(), "live").len() < 2 {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .unwrap();
+    w.send(
+        100,
+        json!({"type":"button_state","pressed":false,"unread":3}),
+    )
+    .await;
+    w.send(110, collection(3, 1, true, 100, 1, 1)).await;
+    w.send(160, json!({"type":"clock"})).await;
+    let text = w
+        .until(|v| v["type"] == "text" && v["mode"] == "batch")
+        .await;
+    assert_eq!(text["audio_seconds"], 0.6);
+    w.send(170, json!({"type":"flush"})).await;
+    w.until(|v| v["type"] == "flushed").await;
+    assert!(pcm_of(&attempts(dir.path(), "live")[1]).is_empty());
+    assert_eq!(
+        w.events
+            .iter()
+            .filter(|v| v["type"] == "text" && v["mode"] == "live")
+            .count(),
+        1
+    );
+    assert_eq!(attempts(dir.path(), "batch").len(), 1);
+    w.close().await;
+}
+
+#[tokio::test]
+async fn live_worker_crash_replays_accepted_and_unacknowledged_pcm_without_restarting_batch() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut w = Worker::with_engine(dir.path(), true, &failing_engine("live", "before_ack")).await;
+    w.send(1, json!({"type":"button_state","pressed":true,"unread":1}))
+        .await;
+    w.send(51, json!({"type":"clock"})).await;
+    w.send(60, collection(1, 1, false, 250, 0, 0)).await;
+    w.until(|v| v["type"] == "text" && v["mode"] == "live")
+        .await;
+    w.send(80, collection(2, 1, false, 250, 0, 0)).await;
+    // No new input is needed to replay both chunks with fresh filter state.
+    for _ in 0..2 {
+        w.until(|v| v["type"] == "text" && v["mode"] == "live")
+            .await;
+    }
+    let live = attempts(dir.path(), "live");
+    assert_eq!(live.len(), 2);
+    assert_eq!(pcm_of(&live[0]), pcm_of(&live[1]));
+    assert_eq!(pcm_of(&live[1]).len(), 1_000);
+    assert_eq!(attempts(dir.path(), "batch").len(), 1);
+    w.send(
+        100,
+        json!({"type":"button_state","pressed":false,"unread":3}),
+    )
+    .await;
+    w.send(110, collection(3, 1, true, 100, 1, 1)).await;
+    w.send(160, json!({"type":"clock"})).await;
+    let text = w
+        .until(|v| v["type"] == "text" && v["mode"] == "batch")
+        .await;
+    assert_eq!(text["audio_seconds"], 0.6);
+    w.send(170, json!({"type":"flush"})).await;
+    w.until(|v| v["type"] == "flushed").await;
+    assert_eq!(attempts(dir.path(), "batch").len(), 1);
+    w.close().await;
+}
+
+#[tokio::test]
+async fn eof_after_accepted_is_recovered_without_a_new_audio_chunk() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut w = Worker::with_engine(dir.path(), true, &failing_engine("live", "after_ack")).await;
+    w.send(1, json!({"type":"button_state","pressed":true,"unread":1}))
+        .await;
+    w.send(51, json!({"type":"clock"})).await;
+    w.send(60, collection(1, 1, false, 250, 0, 0)).await;
+    for _ in 0..2 {
+        w.until(|v| v["type"] == "text" && v["mode"] == "live")
+            .await;
+    }
+    let live = attempts(dir.path(), "live");
+    assert_eq!(live.len(), 2);
+    assert_eq!(pcm_of(&live[0]), pcm_of(&live[1]));
+    w.send(
+        100,
+        json!({"type":"button_state","pressed":false,"unread":2}),
+    )
+    .await;
+    w.send(110, collection(2, 1, true, 23, 1, 1)).await;
+    w.send(160, json!({"type":"clock"})).await;
+    let text = w
+        .until(|v| v["type"] == "text" && v["mode"] == "batch")
+        .await;
+    assert_eq!(text["audio_seconds"], 0.273);
+    w.send(170, json!({"type":"flush"})).await;
+    w.until(|v| v["type"] == "flushed").await;
+    w.close().await;
+}
+
+#[tokio::test]
+async fn batch_finish_crash_replays_the_whole_recording_and_keeps_live_and_the_next_recording() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut w = Worker::with_engine(dir.path(), true, &failing_engine("batch", "finish")).await;
+    w.send(1, json!({"type":"button_state","pressed":true,"unread":1}))
+        .await;
+    w.send(51, json!({"type":"clock"})).await;
+    w.send(60, collection(1, 1, false, 250, 0, 0)).await;
+    w.until(|v| v["type"] == "text" && v["mode"] == "live")
+        .await;
+    w.send(
+        100,
+        json!({"type":"button_state","pressed":false,"unread":2}),
+    )
+    .await;
+    w.send(110, collection(2, 1, true, 101, 1, 1)).await;
+    w.send(160, json!({"type":"clock"})).await;
+    // Reception of the next recording is independent of the failed batch.
+    w.send(
+        200,
+        json!({"type":"button_state","pressed":true,"unread":3}),
+    )
+    .await;
+    w.send(250, json!({"type":"clock"})).await;
+    w.send(260, collection(3, 3, false, 250, 1, 1)).await;
+    w.send(
+        300,
+        json!({"type":"button_state","pressed":false,"unread":4}),
+    )
+    .await;
+    w.send(310, collection(4, 3, true, 27, 3, 2)).await;
+    w.send(360, json!({"type":"clock"})).await;
+    let first = w
+        .until(|v| v["type"] == "text" && v["mode"] == "batch")
+        .await;
+    let second = w
+        .until(|v| v["type"] == "text" && v["mode"] == "batch")
+        .await;
+    assert_eq!(first["audio_seconds"], 0.351);
+    assert_eq!(second["audio_seconds"], 0.277);
+    assert_ne!(first["recording"], second["recording"]);
+    w.send(400, json!({"type":"flush"})).await;
+    w.until(|v| v["type"] == "flushed").await;
+    let batch = attempts(dir.path(), "batch");
+    assert_eq!(batch.len(), 2);
+    let first_pcm = pcm_of(&batch[0]);
+    assert_eq!(first_pcm.len(), 702);
+    assert_eq!(&pcm_of(&batch[1])[..702], first_pcm);
+    assert_eq!(pcm_of(&batch[1]).len(), (351 + 277) * 2);
+    assert_eq!(attempts(dir.path(), "live").len(), 1);
+    assert_eq!(
+        w.events
+            .iter()
+            .filter(|v| v["type"] == "text" && v["mode"] == "batch")
+            .count(),
+        2
+    );
+    w.close().await;
 }
 
 #[tokio::test]

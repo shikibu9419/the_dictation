@@ -23,6 +23,8 @@ use tokio::{
     sync::{mpsc, oneshot},
     task::JoinSet,
 };
+mod recovery;
+use recovery::{EngineFault, Recovery, start_engine};
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Options {
@@ -102,6 +104,7 @@ struct Speech {
     lifecycle: Arc<Mutex<Lifecycle>>,
     output: Output,
     priority: Option<LivePriority>,
+    recovery: Recovery,
 }
 impl Speech {
     async fn start(
@@ -111,8 +114,9 @@ impl Speech {
         lifecycle: Arc<Mutex<Lifecycle>>,
         output: Output,
     ) -> Result<Self> {
-        let engine = speech::create(config, &options.language, mode, output.clone()).await?;
-        let mut speech = Self {
+        let engine = start_engine(config, &options.language, mode, &output).await?;
+        let recovery = Recovery::new(config.clone(), options.language.clone(), engine.control());
+        Ok(Self {
             engine,
             mode,
             key: None,
@@ -125,28 +129,20 @@ impl Speech {
             lifecycle,
             output,
             priority: None,
-        };
-        loop {
-            let event = speech.engine.event().await?;
-            let ready = event.kind() == "ready";
-            speech.event(event)?;
-            if ready {
-                speech.output.debug(format!(
-                    "[{}] {} ready: {}",
-                    mode,
-                    speech.engine.name(),
-                    options.language
-                ));
-                break;
-            }
-        }
-        Ok(speech)
+            recovery,
+        })
     }
     fn event(&mut self, event: EngineReply) -> Result<()> {
         let event = serde_json::to_value(event)?;
         let kind = event["type"].as_str().unwrap_or("");
         if kind == "error" {
-            bail!("{} {}: {}", self.engine.name(), self.mode, event["text"]);
+            return Err(anyhow::anyhow!(
+                "{} {}: {}",
+                self.engine.name(),
+                self.mode,
+                event["text"]
+            ))
+            .context(EngineFault);
         }
         if kind == "status" {
             self.output.debug(format!(
@@ -166,8 +162,26 @@ impl Speech {
             }
         }
         if kind == "partial" || kind == "final" {
+            if self.key.is_none() {
+                return Ok(());
+            }
+            if kind == "final" {
+                self.recovery.final_received();
+            }
             let text = event["text"].as_str().unwrap_or("");
-            if !text.is_empty() && !self.first_result {
+            let suppressed = self.mode == "live"
+                && (!self
+                    .lifecycle
+                    .lock()
+                    .unwrap()
+                    .visible(self.key.as_deref().unwrap_or(""), self.generation)
+                    || kind == "partial"
+                        && !self.recovery.partial_visible(
+                            self.key.as_deref().unwrap_or(""),
+                            self.generation,
+                            event["consumed_samples"].as_u64(),
+                        ));
+            if !suppressed && !text.is_empty() && !self.first_result {
                 if let Some(start) = self.first_input {
                     self.output.debug(format!(
                         "[{}] latency first PCM -> first text: {:.3}s",
@@ -177,12 +191,6 @@ impl Speech {
                 }
                 self.first_result = true;
             }
-            let suppressed = self.mode == "live"
-                && !self
-                    .lifecycle
-                    .lock()
-                    .unwrap()
-                    .visible(self.key.as_deref().unwrap_or(""), self.generation);
             let label = if suppressed && kind == "partial" {
                 "suppressed partial"
             } else {
@@ -243,7 +251,8 @@ impl Speech {
                 "Speech engine {} stalled on {kind} (recording={:?})",
                 self.mode, self.key
             )
-        })?;
+        })
+        .context(EngineFault)?;
         self.output.debug(format!(
             "[{}] engine {kind} acknowledgement: {:.3}s",
             self.mode,
@@ -262,7 +271,7 @@ impl Speech {
         if self.key.is_none()
             && let Some(priority) = &mut self.priority
         {
-            priority.acquire().await?;
+            priority.acquire().await.context(EngineFault)?;
         }
         self.key = Some(part.key.clone());
         self.generation = generation;
@@ -292,8 +301,9 @@ impl Speech {
             }
             while self.engine.input_backlogged() {
                 let activity = self.engine.control().map(|c| c.activity());
-                let event =
-                    active_timeout(Duration::from_secs(120), activity, self.engine.event()).await?;
+                let event = active_timeout(Duration::from_secs(120), activity, self.engine.event())
+                    .await
+                    .context(EngineFault)?;
                 self.event(event)?;
             }
             if self.first_input.is_none() {
@@ -313,7 +323,7 @@ impl Speech {
             self.key = None;
             self.rate = None;
             if let Some(priority) = &mut self.priority {
-                priority.release().await?;
+                priority.release().await.context(EngineFault)?;
             }
         }
         Ok(())
@@ -326,53 +336,9 @@ impl Speech {
         self.generation = None;
         self.rate = None;
         if let Some(priority) = &mut self.priority {
-            priority.release().await?;
+            priority.release().await.context(EngineFault)?;
         }
         Ok(())
-    }
-    async fn work(
-        mut self,
-        mut jobs: mpsc::UnboundedReceiver<Job>,
-        input: Arc<Mutex<Box<dyn InputAdapter>>>,
-    ) -> Result<()> {
-        loop {
-            tokio::select! {
-                event=self.engine.event()=>{self.event(event?)?;}
-                job=jobs.recv()=>{
-                    match job {
-                        Some(job @ (Job::Audio(..) | Job::ReceptionAudio(..)))=>{
-                            let (part, queued, generation) = match job {
-                                Job::Audio(part, queued) => (part, queued, None),
-                                Job::ReceptionAudio(part, queued, generation) => (part, queued, Some(generation)),
-                                _ => unreachable!(),
-                            };
-                            let key=part.key.clone();let checkpoint=part.checkpoint.clone();
-                            if self.mode=="live" && !self.lifecycle.lock().unwrap().permits(&key, generation) {continue;}
-                            self.output.debug(format!("latency {} input wait recording={key}: {:.3}s",self.mode,queued.elapsed().as_secs_f64()));
-                            self.feed(part,queued,generation).await?;
-                            if self.mode=="batch" {
-                                if let Some(checkpoint) = checkpoint {input.lock().unwrap().commit(&checkpoint)?;}
-                                input.lock().unwrap().completed(&key);
-                                let mut life=self.lifecycle.lock().unwrap();life.finished.insert(key.clone());life.retire(&key);
-                            }
-                        }
-                        Some(Job::Release(key))=>{
-                            if self.key.as_ref()==Some(&key) && (self.generation.is_none() || !self.lifecycle.lock().unwrap().permits(&key, self.generation)) {self.cancel().await?;}
-                            let mut life=self.lifecycle.lock().unwrap();
-                            if life.reception.contains_key(&key) || life.released.contains(&key) || life.finished.contains(&key) {
-                                life.closed.insert(key.clone());life.retire(&key);
-                            }
-                        }
-                        Some(Job::Reset(key,generation))=>{
-                            if self.key.as_ref()==Some(&key) && self.generation != Some(generation) {self.cancel().await?;}
-                        }
-                        Some(Job::Checkpoint(value))=>{input.lock().unwrap().commit(&value)?;}
-                        Some(Job::Flush(done))=>{let _=done.send(());}
-                        None=>{self.engine.close().await?;return Ok(());}
-                    }
-                }
-            }
-        }
     }
 }
 
@@ -726,9 +692,9 @@ pub async fn worker(options: Options) -> Result<()> {
     )
     .await?;
     if let Some(live) = &mut live
-        && let Some(batch_control) = batch.engine.control()
+        && let Some(batch_control) = batch.recovery.control()
     {
-        live.priority = Some(LivePriority::new(live.engine.control(), batch_control).await?);
+        live.priority = Some(LivePriority::new(live.recovery.control(), batch_control).await?);
     }
     let (ltx, lrx) = mpsc::unbounded_channel();
     let (btx, brx) = mpsc::unbounded_channel();

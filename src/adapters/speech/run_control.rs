@@ -9,7 +9,7 @@ use anyhow::{Context, Result, bail, ensure};
 use serde_json::json;
 use std::{
     future::Future,
-    sync::Arc,
+    sync::{Arc, Mutex as StdMutex},
     time::{Duration, Instant},
 };
 use tokio::sync::{Mutex, watch};
@@ -36,6 +36,113 @@ pub trait ExecutionControl: Send + Sync {
     /// synchronized computation boundary. It does not cancel the recording.
     fn set_permitted(&self, enabled: bool) -> Reply<'_, ()>;
     fn activity(&self) -> watch::Receiver<RunState>;
+}
+
+#[derive(Clone)]
+struct ControlBinding {
+    revision: u64,
+    control: Option<Arc<dyn ExecutionControl>>,
+}
+
+/// A stable permit endpoint while its owning speech task replaces a failed
+/// process. None is published only AFTER that process has been closed/reaped.
+/// Permit callers can then treat it as quiescent and retain the desired permit
+/// for the replacement. A failed permit also wakes the owner's recovery loop.
+pub struct RestartableControl {
+    binding: watch::Sender<ControlBinding>,
+    restart: watch::Sender<u64>,
+    desired: StdMutex<bool>,
+    serial: Mutex<()>,
+    absent: watch::Receiver<RunState>,
+}
+impl RestartableControl {
+    pub fn new(control: Arc<dyn ExecutionControl>, restart: watch::Sender<u64>) -> Self {
+        let (binding, _) = watch::channel(ControlBinding {
+            revision: 0,
+            control: Some(control),
+        });
+        let (_, absent) = watch::channel(RunState {
+            permitted: false,
+            paused: true,
+            ..Default::default()
+        });
+        Self {
+            binding,
+            restart,
+            desired: StdMutex::new(true),
+            serial: Mutex::new(()),
+            absent,
+        }
+    }
+    pub fn detached(&self) {
+        self.binding.send_modify(|binding| {
+            binding.revision += 1;
+            binding.control = None;
+        });
+    }
+    pub async fn install(&self, control: Arc<dyn ExecutionControl>) -> Result<()> {
+        // Do not lock serial here: a permit caller may be waiting for this
+        // replacement while holding it. No PCM is replayed before install.
+        loop {
+            let requested = *self.desired.lock().unwrap();
+            control.set_permitted(requested).await?;
+            let desired = self.desired.lock().unwrap();
+            if *desired == requested {
+                self.binding.send_modify(|binding| {
+                    binding.revision += 1;
+                    binding.control = Some(control.clone());
+                });
+                return Ok(());
+            }
+        }
+    }
+}
+impl ExecutionControl for RestartableControl {
+    fn activity(&self) -> watch::Receiver<RunState> {
+        self.binding
+            .borrow()
+            .control
+            .as_ref()
+            .map_or_else(|| self.absent.clone(), |control| control.activity())
+    }
+    fn set_permitted(&self, enabled: bool) -> Reply<'_, ()> {
+        Box::pin(async move {
+            let _serial = self.serial.lock().await;
+            *self.desired.lock().unwrap() = enabled;
+            let mut updates = self.binding.subscribe();
+            loop {
+                let binding = updates.borrow_and_update().clone();
+                let Some(control) = binding.control else {
+                    return Ok(());
+                };
+                let result = control.set_permitted(enabled).await;
+                {
+                    // Keep publication excluded through the restart request: a
+                    // delayed error from the old child must not restart a new one.
+                    let current = self.binding.borrow();
+                    if current.revision != binding.revision {
+                        continue; // A late ACK from the old process grants nothing.
+                    }
+                    if result.is_ok() {
+                        return Ok(());
+                    }
+                    ensure!(
+                        !self.restart.is_closed(),
+                        "Speech permit owner closed: {}",
+                        result.unwrap_err()
+                    );
+                    self.restart.send_modify(|generation| *generation += 1);
+                }
+                // The owner listens even while awaiting this very permit. Its
+                // recovery path cancels that future, closes the old process,
+                // and publishes a detached slot before starting a replacement.
+                updates
+                    .changed()
+                    .await
+                    .context("Speech permit binding closed")?;
+            }
+        })
+    }
 }
 pub struct NativeControl {
     input: HelperInput,
@@ -169,6 +276,16 @@ impl LivePriority {
         }
         Ok(())
     }
+    /// After replacing a worker, restore both grants even if a failure happened
+    /// half way through an acquire/release operation.
+    pub async fn reconcile(&mut self, active: bool) -> Result<()> {
+        self.held = !active;
+        if active {
+            self.acquire().await
+        } else {
+            self.release().await
+        }
+    }
 }
 
 /// A deliberately paused batch must not time out while the user dictates a
@@ -218,6 +335,146 @@ pub async fn active_timeout<T>(
 mod tests {
     use super::*;
     use std::sync::Mutex as StdMutex;
+    struct FailedControl(watch::Receiver<RunState>);
+    impl ExecutionControl for FailedControl {
+        fn activity(&self) -> watch::Receiver<RunState> {
+            self.0.clone()
+        }
+        fn set_permitted(&self, _: bool) -> Reply<'_, ()> {
+            Box::pin(async { bail!("synthetic worker exited") })
+        }
+    }
+    #[tokio::test]
+    async fn failed_permit_requests_only_its_owner_and_waits_until_closed() {
+        let (_, activity) = watch::channel(RunState::default());
+        let (restart, mut requests) = watch::channel(0);
+        let slot = Arc::new(RestartableControl::new(
+            Arc::new(FailedControl(activity.clone())),
+            restart,
+        ));
+        let task = tokio::spawn({
+            let slot = slot.clone();
+            async move { slot.set_permitted(false).await }
+        });
+        tokio::time::timeout(Duration::from_secs(1), requests.changed())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(*requests.borrow(), 1);
+        assert!(
+            !task.is_finished(),
+            "A failure is not proof that computation has stopped"
+        );
+        slot.detached(); // The owning speech task has closed/reaped its child.
+        tokio::time::timeout(Duration::from_secs(1), task)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        let trace = Arc::new(StdMutex::new(vec![]));
+        slot.install(Arc::new(Fake {
+            name: "replacement",
+            trace: trace.clone(),
+            activity,
+        }))
+        .await
+        .unwrap();
+        assert_eq!(*trace.lock().unwrap(), ["replacement=false"]);
+        slot.set_permitted(true).await.unwrap();
+        assert_eq!(
+            *trace.lock().unwrap(),
+            ["replacement=false", "replacement=true"]
+        );
+    }
+
+    struct SlowInstall {
+        entered: tokio::sync::Notify,
+        release: tokio::sync::Notify,
+        first: std::sync::atomic::AtomicBool,
+        trace: StdMutex<Vec<bool>>,
+        activity: watch::Receiver<RunState>,
+    }
+    impl ExecutionControl for SlowInstall {
+        fn activity(&self) -> watch::Receiver<RunState> {
+            self.activity.clone()
+        }
+        fn set_permitted(&self, permitted: bool) -> Reply<'_, ()> {
+            Box::pin(async move {
+                self.trace.lock().unwrap().push(permitted);
+                if self.first.swap(false, std::sync::atomic::Ordering::SeqCst) {
+                    self.entered.notify_one();
+                    self.release.notified().await;
+                }
+                Ok(())
+            })
+        }
+    }
+    #[tokio::test]
+    async fn permit_changed_during_install_is_applied_before_publication() {
+        let (_, activity) = watch::channel(RunState::default());
+        let (restart, _requests) = watch::channel(0);
+        let slot = Arc::new(RestartableControl::new(
+            Arc::new(FailedControl(activity.clone())),
+            restart,
+        ));
+        slot.detached();
+        let replacement = Arc::new(SlowInstall {
+            entered: Default::default(),
+            release: Default::default(),
+            first: std::sync::atomic::AtomicBool::new(true),
+            trace: StdMutex::new(vec![]),
+            activity,
+        });
+        let install = tokio::spawn({
+            let slot = slot.clone();
+            let replacement = replacement.clone();
+            async move { slot.install(replacement).await }
+        });
+        replacement.entered.notified().await;
+        slot.set_permitted(false).await.unwrap();
+        replacement.release.notify_one();
+        tokio::time::timeout(Duration::from_secs(1), install)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(*replacement.trace.lock().unwrap(), [true, false]);
+    }
+    #[tokio::test]
+    async fn an_old_ack_is_reapplied_to_the_current_worker() {
+        let (_, activity) = watch::channel(RunState::default());
+        let old = Arc::new(SlowInstall {
+            entered: Default::default(),
+            release: Default::default(),
+            first: std::sync::atomic::AtomicBool::new(true),
+            trace: StdMutex::new(vec![]),
+            activity: activity.clone(),
+        });
+        let (restart, requests) = watch::channel(0);
+        let slot = Arc::new(RestartableControl::new(old.clone(), restart));
+        let permit = tokio::spawn({
+            let slot = slot.clone();
+            async move { slot.set_permitted(false).await }
+        });
+        old.entered.notified().await;
+        slot.detached();
+        let trace = Arc::new(StdMutex::new(vec![]));
+        slot.install(Arc::new(Fake {
+            name: "new",
+            trace: trace.clone(),
+            activity,
+        }))
+        .await
+        .unwrap();
+        old.release.notify_one();
+        tokio::time::timeout(Duration::from_secs(1), permit)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(*trace.lock().unwrap(), ["new=false", "new=false"]);
+        assert_eq!(*requests.borrow(), 0);
+    }
     #[tokio::test]
     async fn pause_requires_boundary_ack_even_without_a_result_consumer() {
         let output = Output::new(false, None).unwrap();

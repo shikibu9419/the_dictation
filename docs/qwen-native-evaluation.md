@@ -144,8 +144,26 @@ liveのMLX peak memoryは2,268,914,354 bytes。両ワーカー合計RSSではな
 
 ## 残る受入条件
 
-- 認識ワーカーの異常時に、親が保持するPCMを使って対象ワーカーだけを再起動・再送する。
-- BLEの音声保持と状態管理の変更を接続し、入力から認識までを別途確認する。
+BLEの音声保持と状態管理は接続済み。合成リングTLVから実際の認識制御プロセス・mock ASRまでのIPCで検証している。ASR再起動・PCM再送も下記の障害注入で確認した。IPC上限とBLE受信設計全体の受入監査は継続中。
+
+## ASRワーカーの障害復旧（2026-10-09）
+
+`recognition/recovery.rs` は故障したモデルだけを再起動する。録音ごとの共有PCMを送信前にjournalへ追加し、ACK前後の終了でも未完了音声を保持する。新しいプロセスでは先頭から再送して推論状態を再構築する。ネイティブの消費cursorが前回の表示位置に追いつくまでpartialを抑制し、完成済みfinalを二重出力しない。
+
+`RestartableControl` は親側に残り、新しいモデルの実行制御へ付け替える。旧プロセスの終了確認、停止中のbatchへの許可継承、付替え中の許可変更、旧ACKの無効化を含む。モデルの再起動中も入力制御・もう一方のモデルは継続する。
+
+実モデルテスト `recognition::recovery::tests::native_live_and_paused_batch_recover_independently_with_shared_permit_bindings` は、固定Qwen 1.7B/8bitと合成日本語WAVを使う。テスト自身が起動したPIDだけにSIGKILLを送り、停止中のbatchと動作中のliveをそれぞれ復旧させた。両方の録音で66,240サンプル（16kHz、4.14秒）を保持し、「こんにちは。これは音声認識の動作確認です。」を一度ずつ確定した。ウィンドウ・BLE・マイク・再生・ユーザーのアプリ起動は行わない。
+
+実行例（モデルは読み取り専用で再利用、manifestは一時ディレクトリへ作成）：
+
+```sh
+INDEX_QWEN_MODEL='/path/to/qwen/model' INDEX_QWEN_FIXTURES='/path/to/generated/wavs' \
+  cargo test --release --bin pebble-index \
+  recognition::recovery::tests::native_live_and_paused_batch_recover_independently_with_shared_permit_bindings \
+  -- --ignored --nocapture
+```
+
+mock ASRではACK前・ACK後・finish中の終了、再起動中のrelease、起動に失敗した後の再試行も検証する。音声の再送バイト列、モデル起動回数、最終結果数を照合する。障害復旧の確認であり、通常時の文字起こし速度が向上したという測定ではない。
 
 
 ## ルートCargoへの統合（2026-10-09）

@@ -100,6 +100,9 @@ impl EngineEvent {
 }
 pub trait SpeechEngine: Send {
     fn name(&self) -> &str;
+    fn process_id(&self) -> Option<u32> {
+        None
+    }
     fn send(&mut self, command: EngineCommand) -> Reply<'_, ()>;
     fn event(&mut self) -> Reply<'_, EngineReply>;
     fn close(&mut self) -> Reply<'_, ()>;

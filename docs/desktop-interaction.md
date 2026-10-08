@@ -10,7 +10,7 @@
 | 状態遷移 | `reception/session_state.rs` | sourceの所属、候補、UI/再開/タップ期限、snapshot |
 | 音声投入計画 | `reception/input_effects.rs` | live cursor、共有PCMへの範囲参照、全文ジョブ、世代 |
 | 入力アダプター | `adapters/input/index.rs / interaction.rs` | 上記の接続、source解放のACK、割当フック |
-| 認識制御 | `recognition.rs` | live/batch、録音IDごとの表示許可・世代照合 |
+| 認識制御 | `recognition.rs / recognition/recovery.rs` | live/batch、録音IDごとの表示許可・世代照合、ASR再起動とPCM再送 |
 | 表示 | `overlay/model.rs` | ID付き進捗、編集・非表示・履歴。独自の押下タイマーは持たない |
 
 `gesture_types.rs` はフックに渡す値、`gestures.rs` は動作の割当口。音声やモデルに依存しない。
@@ -64,7 +64,21 @@ falseまたは対応するfinalで終了猶予（初期値50ms）を始める。
 
 `BLE failure` に失敗段階・OSエラーのdomain/code・再開cursor、`BLE reconnect hint` に再開理由、`BLE communication recovered` に障害からの復旧時間を残す。再接続時も受信cursorと音声ストアを維持し、起動時のflushを繰り返さない。実機の復帰時間・電池消費の測定は未実施。
 
-ASRワーカー異常時の再起動・PCM再送、IPC上限の確認は未完了。受入条件は [BLE受信設計](ble-reception-design.md)、プロトコル根拠は [解析記録](ble-protocol-findings.md) を参照。
+## ASR障害からの復旧
+
+ASRのEOF・エラー・応答タイムアウトは `recognition/recovery.rs` で扱う。故障したliveまたはbatchの子プロセスだけを閉じて再起動する。入力のデコード・受信ストア・状態機械・もう一方のASRは継続する。再送用のjournalはPCMの共有参照を持ち、送信前に更新するため、受領ACK前の切断でも投入途中の音声を失わない。
+
+新しいモデルは推論状態を失っているため、現在の論理録音の先頭から再送する。受領済みPCMも含めてフィルター・窓・prefixを再構築し、未処理ジョブはその後に続ける。新しいBLE読み出しは要求しない。journalの上限は64Miサンプルで、超過時に黙って切り詰めない。再起動中に終了・世代変更されたliveは破棄し、元の全文ジョブは残す。
+
+Qwenの再送中は、消費cursorが以前の表示位置に追いつくまで古いpartialを表示しない。消費cursorを返さない従来の外部ASRでは、この位置による表示抑制は行わない。finalを受け取って表示した後の制御エラーでは、その録音を再認識せず一度だけ完了ACKを渡す。
+
+`RestartableControl` がlive/batchの実行許可を新しいモデルへ引き継ぐ。旧プロセスが終了するまでは停止済みと扱わない。再起動中の許可変更と旧プロセスの遅いACKを世代で照合し、停止中のbatchが復旧直後に勝手に推論を始めることを防ぐ。許可の送信失敗も、当該ワーカーの復旧ループを起こす。
+
+初回は直ちに再起動し、連続失敗時は500msから最大30秒まで待ちを延ばす。モデルのready待ちは240秒。起動に失敗した子も閉じてから再試行する。設定・不正PCM・保存先のエラーはASR再起動で握りつぶさない。
+
+合成TLVとmock ASRのIPCテストは、ACK前後の終了、finish中の終了、再起動中のrelease、再起動失敗後の再試行、連続録音を含む。実Qwenの追加テストでは、自分で起動したliveと停止中のbatchを各一度終了させ、日本語4.14秒の全文をそれぞれ一度だけ確定した。
+
+IPC上限の確認と受入条件全体の監査は継続中。受入条件は [BLE受信設計](ble-reception-design.md)、プロトコル根拠は [解析記録](ble-protocol-findings.md) を参照。
 
 ## 画面を出さない検証
 
