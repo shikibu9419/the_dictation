@@ -7,6 +7,7 @@
 static NSWindow *panel;
 static NSView *gpuiView;
 static BOOL editingText = NO;
+static BOOL circularPanel = NO;
 static pid_t returnTarget = 0;
 static BOOL sourceIsJapanese(TISInputSourceRef source) {
     NSArray *languages = (__bridge NSArray *)TISGetInputSourceProperty(source, kTISPropertyInputSourceLanguages);
@@ -61,7 +62,9 @@ static void layoutRim(void) {
     CGRect bounds = panel.contentView.bounds;
     neon.frame = bounds;
     halo.frame = bounds;
-    CGPathRef path = CGPathCreateWithRoundedRect(CGRectInset(bounds, 10, 10), 18, 18, NULL);
+    CGFloat radius = circularPanel ? (MIN(bounds.size.width, bounds.size.height) - 20) / 2 : 18;
+    glass.layer.cornerRadius = radius;
+    CGPathRef path = CGPathCreateWithRoundedRect(CGRectInset(bounds, 10, 10), radius, radius, NULL);
     for (CAGradientLayer *gradient in @[rim, bloom]) {
         gradient.frame = bounds;
         gradient.mask.frame = bounds;
@@ -181,13 +184,16 @@ int index_frontmost_pid(void) {
     return lastExternalPid;
 }
 void index_status(const char *text) { status.menu.itemArray.firstObject.title = [NSString stringWithUTF8String:text]; }
-void index_panel_resize(double height) {
+void index_panel_resize(double width, double height, bool circular) {
     dispatch_async(dispatch_get_main_queue(), ^{
         [CATransaction begin];
         [CATransaction setDisableActions:YES];
         pinContents(gpuiView.layer);
         NSRect frame = panel.frame;
+        frame.origin.x += (frame.size.width - width) / 2;
+        frame.size.width = width;
         frame.size.height = height;
+        circularPanel = circular;
         [panel setFrame:frame display:YES animate:NO];
         layoutRim();
         [gpuiView displayIfNeeded];
@@ -214,6 +220,7 @@ void index_panel_editing(bool editing) {
 void index_panel_hide(void) { dispatch_async(dispatch_get_main_queue(), ^{
     [[gpuiView inputContext] deactivate];
     [panel orderOut:nil];
+    NSLog(@"[Index panel] hidden visible=%d", panel.isVisible);
     if (NSApp.isActive && returnTarget > 0) {
         [[NSRunningApplication runningApplicationWithProcessIdentifier:returnTarget] activateWithOptions:0];
     }

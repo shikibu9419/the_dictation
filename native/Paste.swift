@@ -47,6 +47,18 @@ final class PasteService {
             targets[id] = (pid, element(app, kAXFocusedWindowAttribute), element(app, kAXFocusedUIElementAttribute))
             return
         }
+        if type == "copy", let text = message["text"] as? String {
+            while busy { try? await Task.sleep(for: .milliseconds(10)) }
+            // Empty taps must preserve the user's existing clipboard.
+            var success = true
+            if !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                NSPasteboard.general.clearContents()
+                success = NSPasteboard.general.setString(text, forType: .string)
+            }
+            emit(["type": "copy_result", "request": id, "success": success,
+                  "text": success ? "" : "クリップボードへコピーできませんでした"])
+            return
+        }
         guard type == "paste", let text = message["text"] as? String else { return }
         func result(_ success: Bool, _ detail: String) {
             emit(["type": "paste_result", "request": id, "success": success, "text": detail])

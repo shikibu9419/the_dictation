@@ -1,4 +1,5 @@
 mod model;
+mod presentation;
 #[path = "../settings.rs"]
 mod settings;
 mod settings_view;
@@ -25,7 +26,7 @@ unsafe extern "C" {
     fn index_panel_show(target: i32);
     fn index_panel_editing(editing: bool);
     fn index_panel_hide();
-    fn index_panel_resize(height: f64);
+    fn index_panel_resize(width: f64, height: f64, circular: bool);
     fn index_reduce_motion() -> bool;
     fn index_panel_visible() -> bool;
     fn index_status(text: *const std::ffi::c_char);
@@ -145,7 +146,7 @@ fn read_events(reader: impl BufRead, generation: Option<u64>) {
                 if let Ok(value) = serde_json::from_str::<serde_json::Value>(&line)
                     && matches!(
                         value["type"].as_str(),
-                        Some("paste_result" | "paste_permission")
+                        Some("paste_result" | "copy_result" | "paste_permission")
                     )
                 {
                     if tx
@@ -185,6 +186,9 @@ struct Overlay {
     input: Entity<InputState>,
     editing: Option<u64>,
     panel_height: f32,
+    panel_circular: bool,
+    presentation: settings::Presentation,
+    copied: std::collections::HashSet<String>,
     settings_window: Option<WindowHandle<settings_view::SettingsView>>,
     _subscriptions: Vec<Subscription>,
 }
@@ -301,6 +305,8 @@ impl Overlay {
     fn event(&mut self, event: Event, window: &mut Window, cx: &mut Context<Self>) {
         let before = self.model.visible().map(|i| (i.id, i.recording.clone(), i.phase));
         let cause = format!("type={} recording={:?} collecting={:?} mode={:?} final={:?} empty={}", event.r#type, event.recording, event.collecting, event.mode, event.r#final, event.empty);
+        let completion_key = event.recording.clone();
+        let completion_text = event.text.clone();
         let completed = event.r#type == "text" && event.mode.as_deref() == Some("batch") && event.r#final == Some(true);
         if event.r#type == "error" {
             self.pasting = false;
@@ -328,10 +334,32 @@ impl Overlay {
                 }
             }
         }
-        if completed { self.save_history(); }
+        if completed {
+            self.save_history();
+            self.copied.retain(|key| self.model.items.iter().any(|item| item.recording.as_ref() == Some(key)));
+            if let Some(key) = completion_key {
+                let id = self.model.items.iter().find(|i| i.recording.as_ref() == Some(&key)).map(|i| i.id);
+                if let Some(id) = id {
+                    if self.copied.insert(key) {
+                        let request = serde_json::json!({"type":"copy", "request":id, "text":completion_text.unwrap_or_default()});
+                        if let Some(backend) = &mut self.backend {
+                            if let Err(error) = backend.send(request) {
+                                self.model.error = Some(format!("コピー要求を送信できませんでした: {error}"));
+                            }
+                        }
+                    }
+                    if !self.presentation.final_text { self.model.dismiss_id(id); }
+                }
+            }
+        }
         self.update_panel(window, cx);
     }
     fn start(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        match settings::Settings::load() {
+            Ok(settings) => self.presentation = settings.presentation,
+            Err(error) => { self.event(Event::error(format!("設定を読み込めませんでした: {error}")), window, cx); return; }
+        }
+        self.copied.clear();
         match Backend::start(&self.backend_path, self.verbose, self.log.as_deref()) {
             Ok(backend) => self.backend = Some(backend),
             Err(e) => self.event(
@@ -391,10 +419,41 @@ impl Overlay {
         cx.notify();
     }
 }
+fn microphone() -> impl IntoElement {
+    div().size(px(24.)).rounded_full().with_animation(
+        "microphone-glow", Animation::new(Duration::from_millis(1067)).repeat(),
+        |d, delta| {
+            let alpha = if unsafe { index_reduce_motion() } { 0.35 } else {
+                0.12 + 0.28 * (1. - (delta * std::f32::consts::TAU).cos()) / 2.
+            };
+            d.shadow(vec![BoxShadow { color: rgba(0xff334b00 | (alpha * 255.) as u32).into(),
+                offset: point(px(0.), px(0.)), blur_radius: px(7.), spread_radius: px(0.) }])
+             .child(canvas(|_, _, _| (), |bounds, _, window, _| {
+                let center = bounds.center();
+                let mut path = PathBuilder::stroke(px(2.2));
+                let p = |x: f32, y: f32| center + point(px(x), px(y));
+                path.move_to(p(-4., -7.));
+                path.cubic_bezier_to(p(4., -7.), p(-4., -12.), p(4., -12.));
+                path.line_to(p(4., 1.));
+                path.cubic_bezier_to(p(-4., 1.), p(4., 6.), p(-4., 6.));
+                path.close();
+                path.move_to(p(-7., -1.));
+                path.line_to(p(-7., 1.));
+                path.cubic_bezier_to(p(7., 1.), p(-7., 10.), p(7., 10.));
+                path.line_to(p(7., -1.));
+                path.move_to(p(0., 7.)); path.line_to(p(0., 11.));
+                path.move_to(p(-4., 11.)); path.line_to(p(4., 11.));
+                if let Ok(path) = path.build() { window.paint_path(path, rgb(0xff334b)); }
+             }).size_full())
+        },
+    )
+}
+
 impl Render for Overlay {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let item = self.model.visible();
         let phase = item.map(|i| i.phase);
+        let circular = presentation::surface(self.presentation, phase, self.model.error.is_some()) == presentation::Surface::Circle;
         let recording = phase == Some(Phase::Recording);
         let busy = matches!(phase, Some(Phase::Receiving | Phase::Finalizing));
         let editable = phase == Some(Phase::Ready) && self.model.error.is_none();
@@ -437,11 +496,12 @@ impl Render for Overlay {
             })
             .unwrap_or(30.);
         let body_height = measured.clamp(30., 300.);
-        let height = body_height + 44.;
-        if self.panel_height != height {
+        let height = if circular { 76. } else { body_height + 44. };
+        if self.panel_height != height || self.panel_circular != circular {
             self.panel_height = height;
+            self.panel_circular = circular;
             unsafe {
-                index_panel_resize(height as f64);
+                index_panel_resize(if circular { 76. } else { 580. }, height as f64, circular);
             }
         }
         div()
@@ -462,10 +522,11 @@ impl Render for Overlay {
                     .size_full()
                     .flex()
                     .items_start()
-                    .py(px(12.))
-                    .px(px(16.))
-                    .gap(px(10.))
-                    .rounded(px(18.))
+                    .py(px(if circular { 0. } else { 12. }))
+                    .px(px(if circular { 0. } else { 16. }))
+                    .gap(px(if circular { 0. } else { 10. }))
+                    .when(circular, |d| d.items_center().justify_center())
+                    .rounded(px(if circular { 28. } else { 18. }))
                     .bg(rgba(0x48484818))
                     .child(
                         div()
@@ -475,7 +536,7 @@ impl Render for Overlay {
                             .flex()
                             .items_center()
                             .justify_center()
-                            .when(recording, |d| {
+                            .when(recording && !circular, |d| {
                                 d.child(
                                     div()
                                         .size(px(15.))
@@ -504,6 +565,7 @@ impl Render for Overlay {
                                         ),
                                 )
                             })
+                            .when(recording && circular, |d| d.child(microphone()))
                             .when(busy, |d| {
                                 d.child(div().size(px(21.)).with_animation(
                                     "processing",
@@ -549,7 +611,7 @@ impl Render for Overlay {
                                 ))
                             }),
                     )
-                    .child(
+                    .when(!circular, |d| d.child(
                         div()
                             .w(px(497.))
                             .flex_none()
@@ -579,7 +641,7 @@ impl Render for Overlay {
                                         .child(text),
                                 )
                             }),
-                    ),
+                    )),
             )
     }
 }
@@ -648,7 +710,7 @@ fn main() -> anyhow::Result<()> {
                         cx.notify();
                     }
                 });
-                let mut view = Overlay { model: load_model(), focus: cx.focus_handle(), backend: None, backend_path, verbose, shown: false, shown_item: None, pasting: false, log, scroll: ScrollHandle::new(), input, editing: None, panel_height: 0., settings_window: None, _subscriptions: vec![subscription] };
+                let mut view = Overlay { model: load_model(), focus: cx.focus_handle(), backend: None, backend_path, verbose, shown: false, shown_item: None, pasting: false, log, scroll: ScrollHandle::new(), input, editing: None, panel_height: 0., panel_circular: false, presentation: settings::Settings::load().map(|s| s.presentation).unwrap_or_default(), copied: Default::default(), settings_window: None, _subscriptions: vec![subscription] };
                 if !preview { view.start(window, cx); }
                 cx.spawn_in(window, async move |this, cx| {
                     while let Some(message) = events.next().await {
@@ -663,6 +725,10 @@ fn main() -> anyhow::Result<()> {
                             Message::Control(event, generation) if accepts_generation(this.backend.as_ref().map(|b| b.generation), generation) => {
                                 if event["type"] == "paste_result" {
                                     this.pasting = false;
+                                    this.update_panel(window, cx);
+                                }
+                                if event["type"] == "copy_result" && event["success"] == false {
+                                    this.model.error = Some(event["text"].as_str().unwrap_or("コピーできませんでした").into());
                                     this.update_panel(window, cx);
                                 }
                                 if event["success"] == false || event["allowed"] == false {

@@ -163,60 +163,189 @@ impl Render for SettingsView {
                     ),
             )
             .child(
-                div().flex().flex_col().gap(px(8.)).child("音声認識").child(
-                    div()
-                        .flex()
-                        .gap(px(8.))
-                        .child(
-                            choice(
-                                "engine-apple",
-                                "SpeechAnalyzer",
-                                self.settings.speech == SpeechModel::Apple,
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(8.))
+                    .child("ライブ認識モデル")
+                    .child(
+                        div()
+                            .flex()
+                            .gap(px(8.))
+                            .child(
+                                choice(
+                                    "engine-apple",
+                                    "SpeechAnalyzer",
+                                    self.settings.speech == SpeechModel::Apple,
+                                )
+                                .on_click(cx.listener(
+                                    |this, _, _, cx| this.choose_speech(SpeechModel::Apple, cx),
+                                )),
                             )
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.choose_speech(SpeechModel::Apple, cx)
-                            })),
-                        )
-                        .child(
-                            choice(
-                                "engine-on-device",
-                                "On Device",
-                                self.settings.speech == SpeechModel::OnDevice,
-                            )
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.choose_speech(SpeechModel::OnDevice, cx)
-                            })),
-                        ),
-                ),
+                            .child(
+                                choice(
+                                    "engine-on-device",
+                                    "On Device",
+                                    self.settings.speech == SpeechModel::OnDevice,
+                                )
+                                .on_click(cx.listener(
+                                    |this, _, _, cx| this.choose_speech(SpeechModel::OnDevice, cx),
+                                )),
+                            ),
+                    ),
             )
-            .when(self.settings.speech == SpeechModel::OnDevice, |d| {
-                d.child(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .gap(px(8.))
-                        .child(
-                            div()
-                                .text_size(px(12.))
-                                .text_color(rgb(0xa2a2a2))
-                                .child("Qwen3-ASR 1.7B · MLX。初回に約2.2 GBを取得します。"),
-                        )
-                        .child(
-                            div()
-                                .id("download-model")
-                                .cursor_pointer()
-                                .py(px(8.))
-                                .child(if self.downloading {
-                                    "ダウンロード中…"
-                                } else if Settings::qwen_ready() {
-                                    "モデルを再確認"
-                                } else {
-                                    "モデルをダウンロード"
-                                })
-                                .on_click(cx.listener(|this, _, _, cx| this.download(cx))),
-                        ),
-                )
-            })
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(8.))
+                    .child("最終認識モデル")
+                    .child(
+                        div()
+                            .flex()
+                            .gap(px(8.))
+                            .child(
+                                choice(
+                                    "batch-apple",
+                                    "SpeechAnalyzer",
+                                    self.settings.recognition_plan().batch == SpeechModel::Apple,
+                                )
+                                .on_click(cx.listener(
+                                    |this, _, _, cx| {
+                                        this.settings.batch_speech = Some(SpeechModel::Apple);
+                                        cx.notify();
+                                    },
+                                )),
+                            )
+                            .child(
+                                choice(
+                                    "batch-device",
+                                    "Qwen3-ASR 1.7B",
+                                    self.settings.recognition_plan().batch == SpeechModel::OnDevice,
+                                )
+                                .on_click(cx.listener(
+                                    |this, _, _, cx| {
+                                        this.settings.batch_speech = Some(SpeechModel::OnDevice);
+                                        cx.notify();
+                                    },
+                                )),
+                            ),
+                    ),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(8.))
+                    .child("録音中の文字起こし")
+                    .child(
+                        div()
+                            .flex()
+                            .gap(px(8.))
+                            .child(
+                                choice(
+                                    "live-show",
+                                    "表示する",
+                                    self.settings.presentation.live_text,
+                                )
+                                .on_click(cx.listener(
+                                    |this, _, _, cx| {
+                                        this.settings.presentation.live_text = true;
+                                        cx.notify();
+                                    },
+                                )),
+                            )
+                            .child(
+                                choice(
+                                    "live-hide",
+                                    "非表示・ライブ認識しない",
+                                    !self.settings.presentation.live_text,
+                                )
+                                .on_click(cx.listener(
+                                    |this, _, _, cx| {
+                                        this.settings.presentation.live_text = false;
+                                        cx.notify();
+                                    },
+                                )),
+                            ),
+                    ),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(8.))
+                    .child("認識完了後の結果")
+                    .child(
+                        div()
+                            .flex()
+                            .gap(px(8.))
+                            .child(
+                                choice(
+                                    "final-show",
+                                    "表示して編集",
+                                    self.settings.presentation.final_text,
+                                )
+                                .on_click(cx.listener(
+                                    |this, _, _, cx| {
+                                        this.settings.presentation.final_text = true;
+                                        cx.notify();
+                                    },
+                                )),
+                            )
+                            .child(
+                                choice(
+                                    "final-hide",
+                                    "表示せず閉じる",
+                                    !self.settings.presentation.final_text,
+                                )
+                                .on_click(cx.listener(
+                                    |this, _, _, cx| {
+                                        this.settings.presentation.final_text = false;
+                                        cx.notify();
+                                    },
+                                )),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(12.))
+                            .text_color(rgb(0xa2a2a2))
+                            .child("どちらも認識完了時にクリップボードへコピーします。"),
+                    ),
+            )
+            .when(
+                self.settings.speech == SpeechModel::OnDevice
+                    || self.settings.recognition_plan().batch == SpeechModel::OnDevice,
+                |d| {
+                    d.child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap(px(8.))
+                            .child(
+                                div()
+                                    .text_size(px(12.))
+                                    .text_color(rgb(0xa2a2a2))
+                                    .child("Qwen3-ASR 1.7B · MLX。初回に約2.2 GBを取得します。"),
+                            )
+                            .child(
+                                div()
+                                    .id("download-model")
+                                    .cursor_pointer()
+                                    .py(px(8.))
+                                    .child(if self.downloading {
+                                        "ダウンロード中…"
+                                    } else if Settings::qwen_ready() {
+                                        "モデルを再確認"
+                                    } else {
+                                        "モデルをダウンロード"
+                                    })
+                                    .on_click(cx.listener(|this, _, _, cx| this.download(cx))),
+                            ),
+                    )
+                },
+            )
             .when_some(self.error.clone(), |d, error| {
                 d.child(
                     div()
@@ -253,7 +382,7 @@ pub fn open(
         WindowOptions {
             window_bounds: Some(WindowBounds::Windowed(Bounds::centered(
                 None,
-                size(px(520.), px(460.)),
+                size(px(560.), px(760.)),
                 cx,
             ))),
             titlebar: Some(TitlebarOptions {
