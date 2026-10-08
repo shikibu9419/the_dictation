@@ -8,6 +8,10 @@ description = "Native Qwen3-ASR MLX worker for Index Voice"
 [lib]
 name = "index_qwen"
 
+[[bin]]
+name = "QwenNative"
+path = "src/main.rs"
+
 [dependencies]
 anyhow = "1"
 base64 = "0.22"

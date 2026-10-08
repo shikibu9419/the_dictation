@@ -525,3 +525,7 @@ extern "C" {
         dtor: Option<unsafe extern "C" fn(*mut c_void)>,
     );
 }
+
+extern "C" {
+    pub fn mlx_get_peak_memory(res: *mut usize) -> std::os::raw::c_int;
+}

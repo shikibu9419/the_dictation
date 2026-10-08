@@ -124,6 +124,14 @@ impl AsrInference {
         })
     }
 
+    pub fn rollback_prefix(&self, ids: &[i64], count: usize) -> Result<Vec<i64>> {
+        let mut end = ids.len().saturating_sub(count);
+        while end > 0 && self.tokenizer.decode(&ids[..end])?.contains('\u{fffd}') {
+            end -= 1;
+        }
+        Ok(ids[..end].to_vec())
+    }
+
     /// Transcribe mono PCM at 16 kHz. Cancellation is checked at token boundaries.
     pub fn transcribe_samples(
         &self,
@@ -144,7 +152,7 @@ impl AsrInference {
         )
     }
 
-    /// The samples must be an append-only prefix of one audio window.
+    /// Samples belong to one audio window: append, or shorten only its uncached tail.
     /// Reset cache before replacing PCM, shifting the window, or changing language.
     pub fn transcribe_cached(
         &self,
