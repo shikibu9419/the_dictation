@@ -16,7 +16,6 @@ use std::{
 use tokio::{process::Command, time::timeout};
 pub const CONTROL: &str = "c0ef558a-2058-fabf-a140-8d5acde50b39";
 pub const DATA: &str = "daad3d52-237c-90a7-b54b-8854a134d801";
-pub const SYSTEM_INPUT: &str = "1d1f4039-23f5-33b2-c24e-704351f20585";
 pub const MAX_SIZE: usize = 655360;
 pub fn pairing_removed(message: &str) -> bool {
     message
@@ -132,7 +131,6 @@ pub struct Bluetooth {
     pending: VecDeque<Value>,
     pending_bytes: usize,
     pub connected: bool,
-    auxiliary_subscribed: bool,
     output: Output,
     metrics: ReadMetrics,
     connected_since: Option<Instant>,
@@ -201,7 +199,6 @@ impl Bluetooth {
             pending: VecDeque::new(),
             pending_bytes: 0,
             connected: false,
-            auxiliary_subscribed: false,
             output,
             metrics: ReadMetrics::default(),
             connected_since: None,
@@ -230,7 +227,6 @@ impl Bluetooth {
         }
         self.clear_pending();
         self.connected = false;
-        self.auxiliary_subscribed = false;
         self.transport_broken = true;
         let helper = Helper::spawn(
             Command::new(&self.program),
@@ -313,11 +309,6 @@ impl Bluetooth {
                 self.connected = false;
             }
         }
-        if event["type"] == "notification" && event["uuid"] == SYSTEM_INPUT {
-            // Protocol semantics are not known. Preserve evidence, never turn
-            // arbitrary bytes into a button edge or a Telesto response.
-            self.output.debug(format!("BLE auxiliary push: {event}"));
-        }
         if event["type"] == "disconnected" {
             self.output.debug(format!("BLE disconnect detail: {event}"));
             self.connected = false;
@@ -332,6 +323,12 @@ impl Bluetooth {
         self.output.debug(format!(
             "Bluetooth command id={id} type={operation} timeout={seconds:.3}s"
         ));
+        if operation == "notify" {
+            self.output.debug(format!(
+                "Bluetooth notification subscription id={id} uuid={} enabled={}",
+                message["uuid"], message["enabled"]
+            ));
+        }
         ensure!(
             self.helper.is_some() && !self.transport_broken,
             "Bluetooth helper requires restart"
@@ -424,46 +421,19 @@ impl Bluetooth {
         self.metrics.report(&self.output, true);
     }
     pub async fn subscribe(&mut self, seconds: f64) -> Result<()> {
+        // Only the two confirmed Telesto response channels are needed. A notify
+        // property on an undocumented characteristic does not make subscribing
+        // safe: the ring disconnects when System Input is enabled on this device.
         for uuid in [CONTROL, DATA] {
             self.request(
                 json!({"type":"notify","uuid":uuid,"enabled":true}),
                 seconds.min(5.0),
             )
             .await?;
-        }
-        let services = self
-            .request(json!({"type":"inspect"}), seconds.min(5.0))
-            .await?;
-        self.output.debug(format!("BLE services: {services}"));
-        let auxiliary_notify = services.as_array().into_iter().flatten().any(|service| {
-            service["characteristics"]
-                .as_array()
-                .into_iter()
-                .flatten()
-                .any(|c| {
-                    c["uuid"] == SYSTEM_INPUT
-                        && c["properties"]
-                            .as_array()
-                            .is_some_and(|p| p.iter().any(|v| v == "notify" || v == "indicate"))
-                })
-        });
-        self.auxiliary_subscribed = false;
-        if auxiliary_notify {
-            match self
-                .request(
-                    json!({"type":"notify","uuid":SYSTEM_INPUT,"enabled":true}),
-                    seconds.min(5.0),
-                )
-                .await
-            {
-                Ok(_) => {
-                    self.auxiliary_subscribed = true;
-                    self.output.debug("Auxiliary notifications subscribed for observation; button push format remains unknown");
-                }
-                Err(error) => self.output.debug(format!(
-                    "Auxiliary notification subscription unavailable: {error:#}"
-                )),
-            }
+            ensure!(
+                self.connected,
+                "Ring disconnected while subscribing to {uuid}"
+            );
         }
         Ok(())
     }
@@ -472,10 +442,7 @@ impl Bluetooth {
             self.clear_pending();
             return;
         }
-        for uuid in [SYSTEM_INPUT, DATA, CONTROL] {
-            if uuid == SYSTEM_INPUT && !self.auxiliary_subscribed {
-                continue;
-            }
+        for uuid in [DATA, CONTROL] {
             if !self.connected {
                 break;
             }
@@ -559,6 +526,56 @@ impl Bluetooth {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test]
+    async fn subscriptions_use_only_telesto_channels_even_if_an_unknown_notify_channel_exists() {
+        let first = r#"exec /usr/bin/awk -v logfile="${0}.commands" '
+BEGIN { print "{\"type\":\"ready\"}"; fflush() }
+{
+  print $0 >> logfile; close(logfile)
+  id=$0; sub(/.*"id":/, "", id); sub(/[^0-9].*/, "", id)
+  if ($0 ~ /"type":"inspect"/) {
+    printf "{\"type\":\"reply\",\"id\":%s,\"value\":[{\"characteristics\":[{\"uuid\":\"1d1f4039-23f5-33b2-c24e-704351f20585\",\"properties\":[\"notify\"]}]}]}\n", id
+  } else if ($0 ~ /1d1f4039/) {
+    print "{\"type\":\"disconnected\",\"reason\":\"unsupported subscription\"}"
+    printf "{\"type\":\"reply\",\"id\":%s,\"error\":\"disconnected\"}\n", id
+  } else if ($0 ~ /"type":"write"/) {
+    print "{\"type\":\"notification\",\"uuid\":\"c0ef558a-2058-fabf-a140-8d5acde50b39\",\"data\":\"AAAAAAAAAAAKAAAA\"}"
+    print "{\"type\":\"notification\",\"uuid\":\"daad3d52-237c-90a7-b54b-8854a134d801\",\"data\":\"AAAAAAAAAAAAAA==\"}"
+    printf "{\"type\":\"reply\",\"id\":%s}\n", id
+  } else { printf "{\"type\":\"reply\",\"id\":%s}\n", id }
+  fflush()
+}
+'"#;
+        let (dir, mut ble) = restarting_bridge(first);
+        ble.ensure_ready().await.unwrap();
+        ble.connect("synthetic-ring", false, 1.).await.unwrap();
+        ble.subscribe(1.).await.unwrap();
+        assert!(ble.connected);
+        assert_eq!(ble.state(1.).await.unwrap().collection_count, 0);
+        ble.unsubscribe().await;
+        ble.close().await;
+        let log = std::fs::read_to_string(dir.path().join("synthetic-bridge.commands")).unwrap();
+        let commands: Vec<Value> = log
+            .lines()
+            .map(|s| serde_json::from_str(s).unwrap())
+            .collect();
+        let subscriptions: Vec<_> = commands
+            .iter()
+            .filter(|v| v["type"] == "notify")
+            .map(|v| (v["uuid"].as_str().unwrap(), v["enabled"].as_bool().unwrap()))
+            .collect();
+        assert_eq!(
+            subscriptions,
+            [
+                (CONTROL, true),
+                (DATA, true),
+                (DATA, false),
+                (CONTROL, false)
+            ]
+        );
+        assert!(!commands.iter().any(|v| v["type"] == "inspect"));
+    }
+
     fn restarting_bridge(first_run: &str) -> (tempfile::TempDir, Bluetooth) {
         use std::os::unix::fs::PermissionsExt;
         let dir = tempfile::tempdir().unwrap();
