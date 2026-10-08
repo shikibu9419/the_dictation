@@ -293,17 +293,21 @@ JSONLは16MiB/行。診断ログは256KiBずつ分けて読み、長いログを
 
 正常EOFは暗黙のflushとして扱う。届いているfinalまでの認識を待ち、入力側の認識完了ACKから発生するretire/checkpointも処理してから`flushed`を返す。その後ジョブの送信口を閉じ、live/batchそれぞれがモデルstdinを閉じて終了するまで待つ。finalが欠けているEOFはエラーにし、全文結果や`flushed`を捏造しない。helper終了の3秒期限にはstdin lock待ちも含め、詰まった送信が強制終了を妨げないようにした。合成IPCで全500サンプル、保存位置、2モデルのEOFを照合した。
 
+Bluetooth helperの起動も接続再試行ループへ入れた。IPCのreadyと無線のpoweredOnを分離し、初期OFFや権限待ちでも同じhelperで状態変更を待つ。広告待ち中のOFFはpending findを維持し、復帰通知で保存UUIDへの再接続へ進む。helper自身のEOF・不正JSON・応答期限切れだけを`TransportFault`として区別し、旧PIDの終了後に再起動する。受信cursor、startup boundary、保持PCMは作り直さない。writeのACK前に到着する通知も32,768件・32MiB相当に制限した。
+
+合成bridgeを最初の音声Cの転送直後に終了させ、実際のS/R/C・接続ループで残りCから復旧することを確認した。boundaryは一回、各Cの取得も一回、raw音声は欠落なし。電源OFFでhelperを再起動しないこと、初回起動失敗・不正JSON・無応答からの復旧をmockプロセスで確認した。Swiftの広告／無線状態ポリシー10シナリオもCoreBluetoothを生成せず検証し、製品用Swift helperはコンパイルのみ行った。
+
 ### 受入監査メモ（実装継続中）
 
 | 範囲 | 確認済みの根拠 | 残る確認 |
 | --- | --- | --- |
 | 第1〜4節の50ms・short/long・結合・表示世代 | `session_state_tests.rs`、純粋な表示モデル、合成TLVのIPC | ファームウェアの83 reset・飽和条件は未確定。対応不明を新しい押下と断定しない |
 | PCMの保持・欠番・live cursor・全文範囲 | `recordings.rs`、`input_effects.rs`、`pcm.rs`、`reception_pipeline.rs` | リングのcounter巻き戻り／リセット時の扱いと、復旧不能sourceの後続Cを監査する |
-| S/R/C・接続期間・広告ヒント | 合成時計のscheduler/connectionテスト、Swift広告フィルターテスト | Bluetooth helper起動時の電源OFF・helperプロセス終了の復旧経路を監査する |
+| S/R/C・接続期間・広告ヒント | 合成時計のscheduler/connectionテスト、Swift広告フィルターテスト | 電源OFF／復帰の純粋ポリシーと、helper終了後の実受信ループ復旧を合成IPCで確認済み。実機でのOS挙動は未測定 |
 | Qwen native・有限窓・停止ACK・再送 | 固定重みの数値比較、実モデル比較、live/batch障害注入 | 実際のBLE・UIを含む総遅延は未測定 |
 | IPC上限・部分行・ファイル分割 | `ipc.rs`、helper単体、`ipc_limits.rs` | GUI/Webhookの従来キューは変更対象外。EOFは全文・保存位置・モデルの正常終了を待つよう修正し、IPCで確認済み |
 
-この時点の画面なしテストは218件通過、4件は通常実行ではignored。実Qwenの独立したlive/batch復旧テストを別途1件実行して通過。Clippyは警告なし。実機の接続維持・復帰時間・電池消費の測定、既存UIの起動や再起動は行っていない。
+この時点の画面なしテストは224件通過、4件は通常実行ではignored。実Qwenの独立したlive/batch復旧テストを別途1件実行して通過。Clippyは警告なし。実機の接続維持・復帰時間・電池消費の測定、既存UIの起動や再起動は行っていない。
 
 状態機械の観測列テストは `src/reception/session_state_tests.rs` に置く。UIなしで再実行する場合は `cargo test --release --lib reception::`。Esc・編集・履歴を扱う既存表示モデルの確認は `cargo test --release --bin index-voice` の純粋なモデルテストを使い、ウィンドウは生成しない。
 

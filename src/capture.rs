@@ -282,17 +282,30 @@ async fn receive(
     outbound: Option<ipc::Sender<Value>>,
     output: Output,
 ) -> Result<()> {
-    let interval = args.interval.unwrap_or(
-        crate::settings::Settings::load()?
-            .reception
-            .state_poll_interval_ms as f64
-            / 1000.,
-    );
-    let mut ble = Bluetooth::start(output.clone()).await?;
+    let ble = Bluetooth::prepare(output.clone()).await?;
+    receive_with_bridge(args, address, fetch, outbound, output, ble).await
+}
+async fn receive_with_bridge(
+    args: Listen,
+    address: String,
+    fetch: bool,
+    outbound: Option<ipc::Sender<Value>>,
+    output: Output,
+    mut ble: Bluetooth,
+) -> Result<()> {
+    let interval = match args.interval {
+        Some(interval) => interval,
+        None => {
+            crate::settings::Settings::load()?
+                .reception
+                .state_poll_interval_ms as f64
+                / 1000.
+        }
+    };
     output.line(if outbound.is_some() {
         "音声認識の準備完了・Bluetooth待機中。リングを長押しして話してください。"
     } else {
-        "Bluetooth準備完了・Bluetooth待機中。リングを長押しして話してください。"
+        "Bluetooth接続待機を開始します。リングを長押しして話してください。"
     });
     let mut received = Received {
         next: None,
@@ -321,8 +334,9 @@ async fn receive(
             ));
             last_mode = mode;
         }
-        let mut stage = "connect";
+        let mut stage = "helper_start";
         let result: Result<DownloadEnd> = async {
+            received.read(ble.ensure_ready()).await?;
             if let Some(reason) = mode {
                 stage = "advertisement_wait";
                 let request = json!({"type":"find","address":address,"watch":true,
@@ -390,14 +404,18 @@ async fn receive(
                     "BLE failure stage={stage} error={error:#}; resume_collection={:?}",
                     received.next
                 ));
+                let helper_fault = error
+                    .downcast_ref::<crate::bluetooth::TransportFault>()
+                    .is_some();
                 if fetch
-                    || crate::bluetooth::encryption_rejected(&text)
-                    || crate::bluetooth::pairing_removed(&text)
-                    || text.contains("Invalid")
-                    || text.contains("length mismatch")
-                    || text.contains("exceeds")
-                    || text.contains("too large")
-                    || text.contains("Truncated")
+                    || (!helper_fault
+                        && (crate::bluetooth::encryption_rejected(&text)
+                            || crate::bluetooth::pairing_removed(&text)
+                            || text.contains("Invalid")
+                            || text.contains("length mismatch")
+                            || text.contains("exceeds")
+                            || text.contains("too large")
+                            || text.contains("Truncated")))
                 {
                     return Err(error);
                 }
@@ -456,6 +474,149 @@ pub async fn run(args: Listen, fetch: bool, output: Output) -> Result<()> {
 #[cfg(test)]
 mod gui_tests {
     use super::*;
+    #[tokio::test]
+    async fn bridge_exit_during_audio_reconnects_at_the_retained_cursor_without_startup_flush() {
+        use std::os::unix::fs::PermissionsExt;
+        fn read_packet(address: u32, size: u32) -> String {
+            let mut bytes = vec![3];
+            bytes.extend(address.to_le_bytes());
+            bytes.extend(0u32.to_le_bytes());
+            bytes.extend(size.to_le_bytes());
+            STANDARD.encode(bytes)
+        }
+        fn reply_header(size: usize) -> String {
+            STANDARD.encode(
+                [
+                    0u32.to_le_bytes(),
+                    0u32.to_le_bytes(),
+                    (size as u32).to_le_bytes(),
+                ]
+                .concat(),
+            )
+        }
+        fn raw(final_part: bool, samples: &[i16]) -> Vec<u8> {
+            let mut body = vec![80];
+            body.extend((4 + samples.len() as u32 * 2).to_le_bytes());
+            body.extend(9997u32.to_le_bytes());
+            for sample in samples {
+                body.extend(sample.to_le_bytes());
+            }
+            body.extend([82, 6, 0]);
+            body.extend(1u32.to_le_bytes());
+            body.extend([1, final_part as u8]);
+            let mut raw = (body.len() as u32 + 4).to_le_bytes().to_vec();
+            raw.extend(body);
+            raw
+        }
+        let first = raw(false, &[1, 2]);
+        let last = raw(true, &[3, 4, 5]);
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("bridge");
+        let mut script = r#"#!/bin/sh
+first=0
+if mkdir "${0}.first" 2>/dev/null; then first=1; fi
+exec /usr/bin/awk -v first="$first" -v logfile="${0}.log" '
+function data(header, payload) {
+  printf "{\"type\":\"notification\",\"uuid\":\"__CONTROL__\",\"data\":\"%s\"}\n", header
+  printf "{\"type\":\"notification\",\"uuid\":\"__DATA__\",\"data\":\"%s\"}\n", payload
+  fflush()
+}
+BEGIN { print "{\"type\":\"ready\"}"; fflush() }
+{ print first "\t" $0 >> logfile; fflush(logfile)
+  id=$0; sub(/.*"id":/, "", id); sub(/[^0-9].*/, "", id)
+  value=($0 ~ /"type":"inspect"/) ? "[]" : "null"
+  printf "{\"type\":\"reply\",\"id\":%s,\"value\":%s}\n", id, value; fflush()
+  if (index($0, "__READ_S__")) data("__HEADER_S__", first ? "__STATE_ACTIVE__" : "__STATE_DONE__")
+  if (index($0, "__READ_R__")) data("__HEADER_R__", first ? "__RANGE_INITIAL__" : "__RANGE_DONE__")
+  if (index($0, "__READ_C1__")) { data("__HEADER_C1__", "__C1__"); exit 9 }
+  if (index($0, "__READ_C2__")) data("__HEADER_C2__", "__C2__")
+}
+'
+"#
+        .to_owned();
+        let read_first = read_packet(0x40020001, 0);
+        let read_last = read_packet(0x40020002, 0);
+        for (key, value) in [
+            ("__CONTROL__", crate::bluetooth::CONTROL.into()),
+            ("__DATA__", crate::bluetooth::DATA.into()),
+            ("__READ_S__", read_packet(0x4003000e, 10)),
+            ("__READ_R__", read_packet(0x40030005, 4)),
+            ("__READ_C1__", read_first.clone()),
+            ("__READ_C2__", read_last.clone()),
+            ("__HEADER_S__", reply_header(10)),
+            ("__HEADER_R__", reply_header(4)),
+            ("__HEADER_C1__", reply_header(first.len())),
+            ("__HEADER_C2__", reply_header(last.len())),
+            (
+                "__STATE_ACTIVE__",
+                STANDARD.encode([0, 0, 255, 255, 1, 0, 0, 0, 2, 32]),
+            ),
+            (
+                "__STATE_DONE__",
+                STANDARD.encode([0, 0, 255, 255, 1, 0, 0, 0, 3, 0]),
+            ),
+            ("__RANGE_INITIAL__", STANDARD.encode([1, 0, 2, 0])),
+            ("__RANGE_DONE__", STANDARD.encode([1, 0, 3, 0])),
+            ("__C1__", STANDARD.encode(&first)),
+            ("__C2__", STANDARD.encode(&last)),
+        ] {
+            script = script.replace(key, &value);
+        }
+        std::fs::write(&path, script).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let output = Output::new(false, None).unwrap();
+        let ble = Bluetooth::with_program(path.clone(), output.clone());
+        let args = Listen {
+            address: Some("synthetic".into()),
+            timeout: 1.,
+            interval: Some(0.05),
+            pair: false,
+            transcribe: false,
+            no_transcribe: false,
+            language: "ja_JP".into(),
+        };
+        let (tx, mut rx) = ipc::process_channel("test capture");
+        let receiving = receive_with_bridge(args, "synthetic".into(), false, Some(tx), output, ble);
+        tokio::pin!(receiving);
+        let events = tokio::select! {
+            result = &mut receiving => panic!("receiver exited: {result:?}"),
+            events = tokio::time::timeout(Duration::from_secs(8), async {
+                let mut events = vec![];
+                loop {
+                    let event = rx.recv().await.unwrap().unwrap();
+                    let done = event["type"] == "collection" && event["index"] == 2;
+                    events.push(event);
+                    if done { return events; }
+                }
+            }) => events.unwrap(),
+        };
+        assert_eq!(events.iter().filter(|v| v["type"] == "boundary").count(), 1);
+        assert!(events.iter().any(|v| v["type"] == "connection_lost"));
+        let chunks: Vec<_> = events
+            .iter()
+            .filter(|v| v["type"] == "collection")
+            .collect();
+        assert_eq!(chunks.len(), 2);
+        assert_eq!(
+            STANDARD.decode(chunks[0]["raw"].as_str().unwrap()).unwrap(),
+            first
+        );
+        assert_eq!(
+            STANDARD.decode(chunks[1]["raw"].as_str().unwrap()).unwrap(),
+            last
+        );
+        let log = std::fs::read_to_string(path.with_extension("log")).unwrap();
+        assert_eq!(
+            log.lines()
+                .filter(|line| line.contains(&read_first))
+                .count(),
+            1
+        );
+        assert_eq!(
+            log.lines().filter(|line| line.contains(&read_last)).count(),
+            1
+        );
+    }
     #[tokio::test]
     async fn ready_read_wins_before_clock_and_pending_read_emits_ordered_ticks() {
         let (tx, mut rx) = ipc::process_channel("capture events");

@@ -46,6 +46,23 @@ struct AdvertisementGate {
     }
 }
 
+// "ready" describes the IPC bridge. Radio availability may change while the
+// same bridge stays alive, including starting the application with power off.
+struct RadioReadiness {
+    private var announced = false
+    private var available = false
+    mutating func update(_ state: CBManagerState) -> (announce: Bool, available: Bool, resumed: Bool) {
+        let next = state == .poweredOn
+        let result = (!announced, next, announced && !available && next)
+        announced = true
+        available = next
+        return result
+    }
+    static func waitsForRadio(operation: String, watch: Bool, state: CBManagerState) -> Bool {
+        operation == "find" && watch && state != .poweredOn
+    }
+}
+
 func activitySignature(_ manufacturer: Data?) -> String? {
     guard let data = manufacturer, data.count == 8 else { return nil }
     let b = [UInt8](data.dropFirst(2))
@@ -80,8 +97,7 @@ final class Bluetooth: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate 
     var pending: [String: Any]?
     var timer: DispatchSourceTimer?
     var serviceCount = 0
-    var ready = false
-    var unavailable = false
+    var radio = RadioReadiness()
     var watchAddress: String?
     var advertisementGate: AdvertisementGate?
     var workspaceObservers: [NSObjectProtocol] = []
@@ -97,6 +113,7 @@ final class Bluetooth: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate 
     }
     func resumeHint(_ reason: String) {
         if current?.state != .connected { resumeRequested = reason }
+        guard central.state == .poweredOn else { return }
         guard operation == "find", pending?["watch"] as? Bool == true,
               let address = pending?["address"] as? String else { return }
         resumeRequested = nil
@@ -112,16 +129,19 @@ final class Bluetooth: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate 
         emit(result)
     }
     var operation: String { pending?["type"] as? String ?? "" }
+    var radioError: String {
+        "Bluetooth is unavailable (state \(central.state.rawValue)). Check Bluetooth power and permission."
+    }
     func centralManagerDidUpdateState(_ central: CBCentralManager) {
-        if central.state == .poweredOn {
-            if !ready { ready = true; emit(["type": "ready"]) }
-            else if unavailable { resumeHint("bluetooth_resumed") }
-            unavailable = false
-        } else if central.state != .unknown && central.state != .resetting {
-            unavailable = true
-            let error = "Bluetooth is unavailable (state \(central.state.rawValue)). Check Bluetooth power and permission."
-            if pending != nil { reply(error: error) }
-            else { emit(["type": "error", "text": error]) }
+        let change = radio.update(central.state)
+        if change.announce { emit(["type": "ready", "available": change.available, "state": central.state.rawValue]) }
+        emit(["type": "status", "available": change.available, "state": central.state.rawValue,
+              "text": change.available ? "Bluetooth available" : radioError])
+        if change.available {
+            if change.resumed { resumeHint("bluetooth_resumed") }
+        } else if pending != nil && !RadioReadiness.waitsForRadio(
+            operation: operation, watch: pending?["watch"] as? Bool == true, state: central.state) {
+            reply(error: radioError)
         }
     }
     func description(_ peripheral: CBPeripheral) -> [String: Any] {
@@ -155,6 +175,18 @@ final class Bluetooth: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate 
         }
         timer = expiry
         expiry.resume()
+        if central.state != .poweredOn {
+            if operation == "disconnect" {
+                current = nil
+                characteristics.removeAll()
+                reply()
+                return
+            }
+            if !RadioReadiness.waitsForRadio(operation: operation, watch: request["watch"] as? Bool == true, state: central.state) {
+                reply(error: radioError)
+                return
+            }
+        }
         switch operation {
         case "cached":
             guard let value = request["address"] as? String, let uuid = UUID(uuidString: value) else { reply(); return }
@@ -309,8 +341,10 @@ final class Bluetooth: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate 
                 bridgeQueue.async { bluetooth.handle(request) }
             }
             bridgeQueue.async {
-                bluetooth.central.stopScan()
-                if let peripheral = bluetooth.current { bluetooth.central.cancelPeripheralConnection(peripheral) }
+                if bluetooth.central.state == .poweredOn {
+                    bluetooth.central.stopScan()
+                    if let peripheral = bluetooth.current { bluetooth.central.cancelPeripheralConnection(peripheral) }
+                }
                 bridgeQueue.asyncAfter(deadline: .now() + 0.2) { exit(0) }
             }
         }

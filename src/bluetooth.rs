@@ -5,10 +5,12 @@ use crate::{
 };
 use anyhow::{Context, Result, bail, ensure};
 use base64::{Engine, engine::general_purpose::STANDARD};
+use pebble_index::ipc::Weight;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{
     collections::VecDeque,
+    path::PathBuf,
     time::{Duration, Instant},
 };
 use tokio::{process::Command, time::timeout};
@@ -114,10 +116,21 @@ pub fn advertised_state(device: &Value) -> Option<RingState> {
             advertisement(&bytes).ok()
         })
 }
+#[derive(Debug)]
+pub struct TransportFault;
+impl std::fmt::Display for TransportFault {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Bluetooth helper transport failed")
+    }
+}
+impl std::error::Error for TransportFault {}
 pub struct Bluetooth {
-    helper: Helper,
+    helper: Option<Helper>,
+    program: PathBuf,
+    transport_broken: bool,
     next: u64,
     pending: VecDeque<Value>,
+    pending_bytes: usize,
     pub connected: bool,
     auxiliary_subscribed: bool,
     output: Output,
@@ -169,32 +182,137 @@ impl ReadMetrics {
     }
 }
 impl Bluetooth {
-    pub async fn start(output: Output) -> Result<Self> {
-        let exe = executable(
+    /// Build/locate the bridge once; listening starts it inside the retry policy.
+    pub async fn prepare(output: Output) -> Result<Self> {
+        let program = executable(
             "Bluetooth",
             include_str!("../native/Bluetooth.swift"),
             &output,
         )
         .await?;
-        let mut helper =
-            Helper::spawn(Command::new(exe), output.clone(), "bluetooth".into()).await?;
-        let event = timeout(Duration::from_secs(30), helper.event()).await??;
-        ensure!(
-            event["type"] == "ready",
-            "Bluetooth initialization failed: {event}"
-        );
-        Ok(Self {
-            helper,
+        Ok(Self::with_program(program, output))
+    }
+    pub(crate) fn with_program(program: PathBuf, output: Output) -> Self {
+        Self {
+            helper: None,
+            program,
+            transport_broken: false,
             next: 0,
             pending: VecDeque::new(),
+            pending_bytes: 0,
             connected: false,
             auxiliary_subscribed: false,
             output,
             metrics: ReadMetrics::default(),
             connected_since: None,
-        })
+        }
+    }
+    pub async fn start(output: Output) -> Result<Self> {
+        let mut bluetooth = Self::prepare(output).await?;
+        if let Err(error) = bluetooth.ensure_ready().await {
+            bluetooth.close().await;
+            return Err(error);
+        }
+        Ok(bluetooth)
+    }
+    pub async fn ensure_ready(&mut self) -> Result<()> {
+        if let Some(helper) = &mut self.helper
+            && helper.child.try_wait()?.is_some()
+        {
+            self.transport_broken = true;
+        }
+        if self.helper.is_some() && !self.transport_broken {
+            return Ok(());
+        }
+        if let Some(mut old) = self.helper.take() {
+            self.output.debug(format!("Restarting Bluetooth helper pid={:?}; receive cursor and PCM remain owned by capture", old.child.id()));
+            old.close().await;
+        }
+        self.clear_pending();
+        self.connected = false;
+        self.auxiliary_subscribed = false;
+        self.transport_broken = true;
+        let helper = Helper::spawn(
+            Command::new(&self.program),
+            self.output.clone(),
+            "bluetooth".into(),
+        )
+        .await
+        .context(TransportFault)?;
+        self.helper = Some(helper);
+        let result = timeout(Duration::from_secs(30), self.next_event()).await;
+        let event = match result {
+            Ok(Ok(event)) => event,
+            Ok(Err(error)) => return Err(error),
+            Err(error) => {
+                return Err(anyhow::Error::new(error)
+                    .context("Bluetooth helper startup timed out")
+                    .context(TransportFault));
+            }
+        };
+        if event["type"] != "ready" {
+            return Err(
+                anyhow::anyhow!("Bluetooth initialization failed: {event}").context(TransportFault)
+            );
+        }
+        self.output
+            .debug(format!("Bluetooth helper ready: {event}"));
+        self.transport_broken = false;
+        Ok(())
+    }
+    async fn next_event(&mut self) -> Result<Value> {
+        let result = self
+            .helper
+            .as_mut()
+            .context("Bluetooth helper is not running")?
+            .event()
+            .await;
+        if result.is_err() {
+            self.transport_broken = true;
+        }
+        result.context(TransportFault)
+    }
+    async fn send(&mut self, message: &Value) -> Result<()> {
+        let result = self
+            .helper
+            .as_mut()
+            .context("Bluetooth helper is not running")?
+            .send(message)
+            .await;
+        if result.is_err() {
+            self.transport_broken = true;
+        }
+        result.context(TransportFault)
+    }
+    fn clear_pending(&mut self) {
+        self.pending.clear();
+        self.pending_bytes = 0;
+    }
+    fn buffer_notification(&mut self, event: Value) -> Result<()> {
+        let bytes = event.queued_bytes();
+        ensure!(
+            self.pending.len() < 32768
+                && bytes <= (32 * 1024 * 1024usize).saturating_sub(self.pending_bytes),
+            "Telesto notification backlog exceeds bounds: messages={} bytes={}",
+            self.pending.len(),
+            self.pending_bytes
+        );
+        self.pending_bytes += bytes;
+        self.pending.push_back(event);
+        Ok(())
+    }
+    fn pop_notification(&mut self) -> Option<Value> {
+        let event = self.pending.pop_front()?;
+        self.pending_bytes -= event.queued_bytes();
+        Some(event)
     }
     fn observe(&mut self, event: &Value) {
+        if event["type"] == "status" {
+            self.output.debug(format!("Bluetooth status: {event}"));
+            if event["available"] == false {
+                self.connected = false;
+            }
+        }
         if event["type"] == "notification" && event["uuid"] == SYSTEM_INPUT {
             // Protocol semantics are not known. Preserve evidence, never turn
             // arbitrary bytes into a button edge or a Telesto response.
@@ -214,10 +332,14 @@ impl Bluetooth {
         self.output.debug(format!(
             "Bluetooth command id={id} type={operation} timeout={seconds:.3}s"
         ));
-        timeout(Duration::from_secs_f64(seconds + 1.0), async {
-            self.helper.send(&message).await?;
+        ensure!(
+            self.helper.is_some() && !self.transport_broken,
+            "Bluetooth helper requires restart"
+        );
+        let result = timeout(Duration::from_secs_f64(seconds + 1.0), async {
+            self.send(&message).await?;
             loop {
-                let event = self.helper.event().await?;
+                let event = self.next_event().await?;
                 self.observe(&event);
                 if event["type"] == "reply" && event["id"].as_u64() == Some(id) {
                     self.output
@@ -238,14 +360,19 @@ impl Bluetooth {
                     bail!("Bluetooth: {}", event["text"]);
                 }
                 if event["type"] == "notification" && (event["uuid"] == CONTROL || event["uuid"] == DATA) {
-                    self.pending.push_back(event);
+                    self.buffer_notification(event)?;
                 }
             }
         })
-        .await
-        .with_context(|| {
-            format!("Bluetooth helper did not acknowledge command id={id} type={operation}")
-        })?
+        .await;
+        if result.is_err() {
+            self.transport_broken = true;
+        }
+        result
+            .with_context(|| {
+                format!("Bluetooth helper did not acknowledge command id={id} type={operation}")
+            })
+            .map_err(|error| error.context(TransportFault))?
     }
     pub async fn connect(&mut self, address: &str, pair: bool, seconds: f64) -> Result<()> {
         let attempts = if pair { 3 } else { 1 };
@@ -279,12 +406,15 @@ impl Bluetooth {
         unreachable!()
     }
     pub async fn disconnect(&mut self) {
-        if let Err(error) = self.request(json!({"type":"disconnect"}), 3.0).await {
+        if self.helper.is_some()
+            && !self.transport_broken
+            && let Err(error) = self.request(json!({"type":"disconnect"}), 3.0).await
+        {
             self.output
                 .debug(format!("Bluetooth disconnect: {error:#}"));
         }
         self.connected = false;
-        self.pending.clear();
+        self.clear_pending();
         if let Some(since) = self.connected_since.take() {
             self.output.debug(format!(
                 "BLE connection duration_s={:.3}",
@@ -338,6 +468,10 @@ impl Bluetooth {
         Ok(())
     }
     pub async fn unsubscribe(&mut self) {
+        if self.helper.is_none() || self.transport_broken {
+            self.clear_pending();
+            return;
+        }
         for uuid in [SYSTEM_INPUT, DATA, CONTROL] {
             if uuid == SYSTEM_INPUT && !self.auxiliary_subscribed {
                 continue;
@@ -353,10 +487,10 @@ impl Bluetooth {
                     .debug(format!("Stop notification failed: {error:#}"));
             }
         }
-        self.pending.clear();
+        self.clear_pending();
     }
     pub async fn read(&mut self, address: u32, length: u32, seconds: f64) -> Result<Vec<u8>> {
-        self.pending.clear();
+        self.clear_pending();
         let mut response = Response::default();
         let started = Instant::now();
         let mut first_notification = None;
@@ -369,7 +503,7 @@ impl Bluetooth {
                     self.output.debug(format!("BLE read address=0x{address:08x} bytes={} first_notification_ms={:?} total_ms={:.1}", data.len(), first_notification, started.elapsed().as_secs_f64()*1000.0));
                     return Ok(data);
                 }
-                let event=match self.pending.pop_front() { Some(e)=>e,None=>self.helper.event().await? };
+                let event=match self.pop_notification() { Some(e)=>e,None=>self.next_event().await? };
                 self.observe(&event);
                 if event["type"]=="error" { bail!("Bluetooth: {}",event["text"]); }
                 if event["type"]!="notification" { continue; }
@@ -415,13 +549,151 @@ impl Bluetooth {
     }
     pub async fn close(&mut self) {
         self.disconnect().await;
-        self.helper.close().await;
+        if let Some(helper) = &mut self.helper {
+            helper.close().await;
+        }
+        self.helper = None;
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn restarting_bridge(first_run: &str) -> (tempfile::TempDir, Bluetooth) {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("synthetic-bridge");
+        let restored = r#"exec /usr/bin/awk '
+BEGIN { print "{\"type\":\"ready\",\"available\":false}"; fflush() }
+{ id=$0; sub(/.*"id":/, "", id); sub(/[^0-9].*/, "", id)
+  printf "{\"type\":\"reply\",\"id\":%s,\"value\":42}\n", id; fflush() }
+'"#;
+        let script = [
+            "#!/bin/sh\nif mkdir \"${0}.first\" 2>/dev/null; then\n",
+            first_run,
+            "\nelse\n",
+            restored,
+            "\nfi\n",
+        ]
+        .concat();
+        std::fs::write(&path, script).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        (
+            dir,
+            Bluetooth::with_program(path, Output::new(false, None).unwrap()),
+        )
+    }
+    #[tokio::test]
+    async fn eof_and_invalid_json_replace_only_the_failed_bridge_and_preserve_request_order() {
+        for failure in ["exit 9", "printf 'not-json\\n'; read line"] {
+            let first = format!("printf '{{\"type\":\"ready\"}}\\n'; read line; {failure}");
+            let (_dir, mut ble) = restarting_bridge(&first);
+            ble.ensure_ready().await.unwrap();
+            let before = ble.helper.as_ref().unwrap().child.id();
+            ble.metrics.attempts[2] = 7;
+            let error = ble
+                .request(json!({"type":"cached"}), 0.1)
+                .await
+                .unwrap_err();
+            assert!(
+                error.downcast_ref::<TransportFault>().is_some(),
+                "{error:#}"
+            );
+            assert!(ble.transport_broken);
+            ble.ensure_ready().await.unwrap();
+            assert_ne!(ble.helper.as_ref().unwrap().child.id(), before);
+            let healthy = ble.helper.as_ref().unwrap().child.id();
+            assert_eq!(
+                ble.request(json!({"type":"cached"}), 0.1).await.unwrap(),
+                42
+            );
+            assert_eq!(ble.next, 2);
+            assert_eq!(ble.metrics.attempts[2], 7);
+            ble.ensure_ready().await.unwrap();
+            assert_eq!(ble.helper.as_ref().unwrap().child.id(), healthy);
+            ble.close().await;
+        }
+    }
+    #[tokio::test]
+    async fn a_live_but_unresponsive_bridge_is_closed_before_its_replacement_starts() {
+        let (_dir, mut ble) =
+            restarting_bridge(r#"printf '{"type":"ready"}\n'; while read line; do :; done"#);
+        ble.ensure_ready().await.unwrap();
+        let old = ble.helper.as_ref().unwrap().child.id();
+        let error = ble
+            .request(json!({"type":"cached"}), 0.01)
+            .await
+            .unwrap_err();
+        assert!(error.downcast_ref::<TransportFault>().is_some());
+        ble.ensure_ready().await.unwrap();
+        assert_ne!(ble.helper.as_ref().unwrap().child.id(), old);
+        assert_eq!(
+            ble.request(json!({"type":"cached"}), 0.1).await.unwrap(),
+            42
+        );
+        ble.close().await;
+    }
+    #[tokio::test]
+    async fn an_initial_helper_failure_can_retry_without_reconstructing_the_receiver() {
+        let (_dir, mut ble) =
+            restarting_bridge(r#"printf '{"type":"error","text":"startup failure"}\n'; read line"#);
+        assert!(
+            ble.ensure_ready()
+                .await
+                .unwrap_err()
+                .downcast_ref::<TransportFault>()
+                .is_some()
+        );
+        ble.ensure_ready().await.unwrap();
+        assert_eq!(
+            ble.request(json!({"type":"cached"}), 0.1).await.unwrap(),
+            42
+        );
+        ble.close().await;
+    }
+    #[tokio::test]
+    async fn power_off_is_a_radio_error_and_does_not_restart_the_bridge() {
+        let first = r#"exec /usr/bin/awk '
+BEGIN { print "{\"type\":\"ready\",\"available\":false}"; fflush() }
+{ id=$0; sub(/.*"id":/, "", id); sub(/[^0-9].*/, "", id)
+  if ($0 ~ /"type":"connect"/) {
+    print "{\"type\":\"status\",\"available\":false,\"state\":4}";
+    printf "{\"type\":\"reply\",\"id\":%s,\"error\":\"Bluetooth unavailable state=4\"}\n", id
+  } else { printf "{\"type\":\"reply\",\"id\":%s}\n", id }
+  fflush() }
+'"#;
+        let (_dir, mut ble) = restarting_bridge(first);
+        ble.ensure_ready().await.unwrap();
+        let pid = ble.helper.as_ref().unwrap().child.id();
+        ble.connected = true;
+        let error = ble
+            .request(json!({"type":"connect"}), 0.1)
+            .await
+            .unwrap_err();
+        assert!(error.downcast_ref::<TransportFault>().is_none());
+        assert!(!ble.connected);
+        assert!(!ble.transport_broken);
+        ble.ensure_ready().await.unwrap();
+        assert_eq!(ble.helper.as_ref().unwrap().child.id(), pid);
+        ble.close().await;
+    }
+    #[test]
+    fn early_notifications_have_a_bounded_backlog_and_release_their_charge() {
+        let mut ble = Bluetooth::with_program(PathBuf::new(), Output::new(false, None).unwrap());
+        let event = json!({"type":"notification","uuid":DATA,"data":"AA=="});
+        ble.buffer_notification(event.clone()).unwrap();
+        assert_eq!(ble.pending_bytes, event.queued_bytes());
+        assert_eq!(ble.pop_notification(), Some(event.clone()));
+        assert_eq!(ble.pending_bytes, 0);
+        ble.pending_bytes = 32 * 1024 * 1024;
+        assert!(ble.buffer_notification(event.clone()).is_err());
+        assert!(ble.pending.is_empty());
+        ble.clear_pending();
+        ble.pending = vec![Value::Null; 32768].into();
+        assert!(ble.buffer_notification(event).is_err());
+        ble.clear_pending();
+        assert_eq!(ble.pending_bytes, 0);
+    }
     #[test]
     fn advertisement_baseline_matches_the_native_watch_filter() {
         let state = advertisement(&[1, 0, 0, 0, 2, 0xa0]).unwrap();
