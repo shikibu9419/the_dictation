@@ -159,6 +159,91 @@ fn batch_sizes(dir: &Path) -> Vec<usize> {
     sizes
 }
 
+#[tokio::test]
+async fn eof_drains_complete_audio_persists_its_checkpoint_and_closes_both_engines() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut script = failing_engine("never", "never").replace(
+        "printf '{\"type\":\"final\"",
+        "sleep 0.1; printf '{\"type\":\"final\"",
+    );
+    script.push_str("printf '%s\\t{\"type\":\"test_eof\"}\\n' \"$2\" >> \"$ENGINE_LOG\"\n");
+    let mut w = Worker::with_engine(dir.path(), true, &script).await;
+    w.send(1, json!({"type":"button_state","pressed":true,"unread":1}))
+        .await;
+    w.send(10, collection(1, 1, false, 400, 0, 0)).await;
+    w.send(60, json!({"type":"clock"})).await;
+    w.send(
+        80,
+        json!({"type":"button_state","pressed":false,"unread":2}),
+    )
+    .await;
+    w.send(90, collection(2, 1, true, 100, 1, 1)).await;
+    w.send(140, json!({"type":"clock"})).await;
+    drop(w.input.take()); // No explicit flush and no waiting for ASR first.
+    w.until(|v| v["type"] == "flushed").await;
+    assert_eq!(
+        w.events
+            .iter()
+            .filter(|v| v["type"] == "text" && v["final"] == true)
+            .count(),
+        1
+    );
+    assert_eq!(batch_sizes(dir.path()), [500]);
+    let cursor = std::fs::read_dir(dir.path().join("pebble-index-rust"))
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .find(|path| {
+            path.file_name()
+                .unwrap()
+                .to_string_lossy()
+                .starts_with("cursor-")
+        })
+        .unwrap();
+    assert_eq!(
+        serde_json::from_slice::<Value>(&std::fs::read(cursor).unwrap()).unwrap()["next_index"],
+        3
+    );
+    w.close().await;
+    let log = std::fs::read_to_string(dir.path().join("engine.log")).unwrap();
+    for mode in ["live", "batch"] {
+        assert!(
+            log.contains(&format!("{mode}\t{{\"type\":\"test_eof\"}}")),
+            "{log}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn eof_with_missing_ring_final_reports_failure_instead_of_successful_completion() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut w = Worker::new(dir.path(), true).await;
+    w.send(1, json!({"type":"button_state","pressed":true,"unread":1}))
+        .await;
+    w.send(10, collection(1, 1, false, 400, 0, 0)).await;
+    drop(w.input.take());
+    tokio::time::timeout(Duration::from_secs(10), async {
+        let mut failed = false;
+        while let Some(line) = w.output.next_line().await.unwrap() {
+            let value: Value = serde_json::from_str(&line).unwrap();
+            assert_ne!(value["final"], true);
+            assert_ne!(value["type"], "flushed");
+            if value["type"] == "error" {
+                assert!(
+                    value["text"]
+                        .as_str()
+                        .unwrap()
+                        .contains("before final audio")
+                );
+                failed = true;
+            }
+        }
+        assert!(failed);
+        assert!(!w.child.wait().await.unwrap().success());
+    })
+    .await
+    .unwrap();
+}
+
 fn failing_engine(mode: &str, point: &str) -> String {
     format!(
         r#"#!/bin/sh

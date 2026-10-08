@@ -614,68 +614,95 @@ impl Recognition {
         life.retire(key);
         Ok(())
     }
+    fn apply_event(&mut self, event: InputEvent) -> Result<()> {
+        match event {
+            InputEvent::Gesture(event) => emit(json!({"type":"gesture", "gesture":event.gesture,
+                "first_collection":event.first_collection, "last_collection":event.last_collection})),
+            InputEvent::Checkpoint(value) => self.batch.send(Job::Checkpoint(value))?,
+            InputEvent::Audio(part) => self.add(part)?,
+            InputEvent::Reception { namespace, effect } => self.reception(&namespace, effect)?,
+            InputEvent::Level { key, level } => {
+                if self
+                    .lifecycle
+                    .lock()
+                    .unwrap()
+                    .reception
+                    .get(&key)
+                    .is_some_and(|s| s.visible && s.live)
+                {
+                    emit(json!({"type":"audio_level", "recording":key, "level":level}));
+                }
+            }
+            InputEvent::State(collecting) => self.state(collecting)?,
+            InputEvent::Discard(key) => self.discard(&key)?,
+            InputEvent::Flush => {
+                bail!("Input adapter recursively requested flush while acknowledging recognition")
+            }
+        }
+        Ok(())
+    }
+    async fn flush(&mut self, input: &Arc<Mutex<Box<dyn InputAdapter>>>) -> Result<()> {
+        ensure!(
+            self.audio.is_empty(),
+            "Input ended before final audio for recordings: {:?}",
+            self.audio.keys().collect::<Vec<_>>()
+        );
+        loop {
+            let (live, live_done) = oneshot::channel();
+            let (batch, batch_done) = oneshot::channel();
+            if let Some(sender) = &self.live {
+                sender.send(Job::Flush(live))?;
+            } else {
+                let _ = live.send(());
+            }
+            self.batch.send(Job::Flush(batch))?;
+            live_done.await?;
+            batch_done.await?;
+            // completed() may enqueue input-owned retire/checkpoint actions.
+            // Apply and drain those before declaring flush durable.
+            let acknowledgements = input.lock().unwrap().poll(&self.output)?;
+            if acknowledgements.is_empty() {
+                break;
+            }
+            for event in acknowledgements {
+                self.apply_event(event)?;
+            }
+        }
+        emit(json!({"type":"flushed"}));
+        Ok(())
+    }
     async fn input(mut self, input: Arc<Mutex<Box<dyn InputAdapter>>>) -> Result<()> {
         let mut lines = Lines::new(BufReader::new(tokio::io::stdin()), ipc::MAX_LINE_BYTES);
         let mut clock = tokio::time::interval(Duration::from_millis(5));
         clock.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
+            let mut eof = false;
             let events = tokio::select! {
                 biased;
                 line = lines.next_line() => {
-                    let Some(line) = line? else { break };
-                    let message: Value = serde_json::from_str(&line)?;
-                    input.lock().unwrap().decode(message, &self.output)?
+                    if let Some(line) = line? {
+                        let message: Value = serde_json::from_str(&line)?;
+                        input.lock().unwrap().decode(message, &self.output)?
+                    } else {
+                        input.lock().unwrap().end_input()?;
+                        eof = true;
+                        vec![InputEvent::Flush]
+                    }
                 }
                 _ = clock.tick() => input.lock().unwrap().poll(&self.output)?,
             };
             for event in events {
-                match event {
-                    InputEvent::Gesture(event) => {
-                        emit(json!({"type":"gesture", "gesture":event.gesture,
-                        "first_collection":event.first_collection, "last_collection":event.last_collection}))
-                    }
-                    InputEvent::Checkpoint(value) => self.batch.send(Job::Checkpoint(value))?,
-                    InputEvent::Audio(part) => self.add(part)?,
-                    InputEvent::Reception { namespace, effect } => {
-                        self.reception(&namespace, effect)?
-                    }
-                    InputEvent::Level { key, level } => {
-                        if self
-                            .lifecycle
-                            .lock()
-                            .unwrap()
-                            .reception
-                            .get(&key)
-                            .is_some_and(|s| s.visible && s.live)
-                        {
-                            emit(json!({"type":"audio_level", "recording":key, "level":level}));
-                        }
-                    }
-                    InputEvent::State(collecting) => self.state(collecting)?,
-                    InputEvent::Discard(key) => self.discard(&key)?,
-                    InputEvent::Flush => {
-                        ensure!(
-                            self.audio.is_empty(),
-                            "Input ended before final audio for recordings: {:?}",
-                            self.audio.keys().collect::<Vec<_>>()
-                        );
-                        let (live, live_done) = oneshot::channel();
-                        let (batch, batch_done) = oneshot::channel();
-                        if let Some(sender) = &self.live {
-                            sender.send(Job::Flush(live))?;
-                        } else {
-                            let _ = live.send(());
-                        }
-                        self.batch.send(Job::Flush(batch))?;
-                        live_done.await?;
-                        batch_done.await?;
-                        emit(json!({"type":"flushed"}));
-                    }
+                if matches!(event, InputEvent::Flush) {
+                    self.flush(&input).await?;
+                } else {
+                    self.apply_event(event)?;
                 }
             }
+            if eof {
+                return Ok(());
+            } // Drop job senders; each model then receives EOF.
             tokio::task::yield_now().await;
         }
-        Ok(())
     }
 }
 
@@ -745,10 +772,17 @@ pub async fn worker(options: Options) -> Result<()> {
     tasks.spawn(batch.work(brx, input.clone()));
     tasks.spawn(recognition.input(input));
     emit(json!({"type":"ready"}));
-    let result = tasks.join_next().await.context("No recognition tasks")??;
-    tasks.abort_all();
-    while tasks.join_next().await.is_some() {}
-    result
+    while let Some(result) = tasks.join_next().await {
+        let result = result
+            .context("Recognition task failed")
+            .and_then(|result| result);
+        if let Err(error) = result {
+            tasks.abort_all();
+            while tasks.join_next().await.is_some() {}
+            return Err(error);
+        }
+    }
+    Ok(())
 }
 
 pub struct Client {

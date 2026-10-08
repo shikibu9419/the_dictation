@@ -186,12 +186,18 @@ impl Helper {
     }
     pub async fn close(&mut self) {
         // Closing the handle delivers EOF; shutdown() alone leaves the pipe open on macOS.
-        drop(self.stdin.0.lock().await.take());
-        if tokio::time::timeout(Duration::from_secs(3), self.child.wait())
-            .await
-            .is_err()
-        {
+        // Include acquiring stdin in the deadline: a stuck writer must not
+        // prevent its own owner from being stopped and replaced.
+        let closed = tokio::time::timeout(Duration::from_secs(3), async {
+            drop(self.stdin.0.lock().await.take());
+            self.child.wait().await
+        })
+        .await;
+        if !matches!(closed, Ok(Ok(_))) {
             let _ = self.child.kill().await;
+            if let Ok(mut stdin) = self.stdin.0.try_lock() {
+                drop(stdin.take());
+            }
         }
     }
 }
@@ -215,6 +221,28 @@ impl Drop for ProcessGroup {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test]
+    async fn shutdown_deadline_includes_a_stuck_stdin_writer() {
+        let mut command = Command::new("/bin/sh");
+        command.args(["-c", "read line"]);
+        let mut helper = Helper::spawn(command, Output::new(false, None).unwrap(), "test".into())
+            .await
+            .unwrap();
+        let input = helper.stdin.0.clone();
+        let held = input.lock().await;
+        tokio::time::timeout(Duration::from_secs(4), helper.close())
+            .await
+            .unwrap();
+        assert!(helper.child.try_wait().unwrap().is_some());
+        drop(held);
+        helper.close().await;
+        assert!(
+            helper
+                .send(&serde_json::json!({"type":"audio"}))
+                .await
+                .is_err()
+        );
+    }
     #[tokio::test]
     async fn control_observer_keeps_running_with_a_stalled_consumer_and_sees_overflow() {
         use std::sync::atomic::{AtomicBool, Ordering};

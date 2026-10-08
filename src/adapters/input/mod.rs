@@ -41,6 +41,10 @@ pub trait InputAdapter: Send {
         Ok(vec![])
     }
     fn completed(&mut self, _key: &str) {}
+    /// EOF must not fabricate final audio or advance gesture deadlines.
+    fn end_input(&self) -> Result<()> {
+        Ok(())
+    }
     fn commit(&mut self, _checkpoint: &Value) -> Result<()> {
         Ok(())
     }

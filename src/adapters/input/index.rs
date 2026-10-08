@@ -294,6 +294,12 @@ impl InputAdapter for IndexInput {
     fn completed(&mut self, key: &str) {
         self.completed.push(key.into());
     }
+    fn end_input(&self) -> Result<()> {
+        if self.save_cursor {
+            self.interaction.ensure_flushed()?;
+        }
+        Ok(())
+    }
     fn commit(&mut self, checkpoint: &Value) -> Result<()> {
         if self.save_cursor {
             let index = u16::try_from(checkpoint.as_u64().context("Invalid Index checkpoint")?)?;
