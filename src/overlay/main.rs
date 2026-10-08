@@ -236,7 +236,7 @@ impl Overlay {
     fn panel_layout(&self, window: &mut Window) -> (bool, String, f32, f32) {
         let item = self.model.visible();
         let phase = item.map(|i| i.phase);
-        let circular = presentation::surface(self.presentation, phase, self.model.error.is_some()) == presentation::Surface::Circle;
+        let circular = presentation::surface(self.presentation, phase, self.model.error.is_some(), self.model.history_view) != presentation::Surface::Transcript;
         let text = self
             .model
             .error
@@ -246,6 +246,7 @@ impl Overlay {
                 match phase {
                     Some(Phase::Ready) => "音声を認識できませんでした",
                     Some(Phase::Receiving) => "録音を受信中…",
+                    Some(Phase::Reconnecting) => "通信切断・待機中…",
                     Some(Phase::Finalizing) => "全文を文字起こし中…",
                     _ => "話してください…",
                 }
@@ -288,14 +289,14 @@ impl Overlay {
             unsafe { index_panel_resize(if circular { 96. } else { 580. }, height as f64, circular); }
         }
 
-        if self.presentation.live_text || !self.model.visible().is_some_and(|item| item.phase == Phase::Recording) {
+        if self.presentation.live_mode || !self.model.visible().is_some_and(|item| item.phase == Phase::Recording) {
             unsafe { index_panel_audio(0., false); }
         }
         let was_editing = self.editing;
         let editable = self
             .model
             .visible()
-            .filter(|i| i.phase == Phase::Ready)
+            .filter(|i| i.phase == Phase::Ready && (self.presentation.live_mode || self.model.history_view))
             .map(|i| (i.id, i.text.clone()));
         if let Some((id, text)) = editable {
             if self.editing != Some(id) {
@@ -318,7 +319,7 @@ impl Overlay {
             unsafe { index_panel_editing(self.editing.is_some()); }
         }
         let visible =
-            !self.pasting && (self.model.visible().is_some() || self.model.error.is_some());
+            !self.pasting && presentation::surface(self.presentation, self.model.visible().map(|i| i.phase), self.model.error.is_some(), self.model.history_view) != presentation::Surface::Hidden;
         let item_id = self.model.visible().map(|item| item.id);
         unsafe {
             let title = if self.model.error.is_some() {
@@ -421,7 +422,7 @@ impl Overlay {
                             }
                         }
                     }
-                    if !self.presentation.final_text || self.model.items.iter().any(|i| i.id == id && i.text.trim().is_empty()) { self.model.dismiss_id(id); }
+                    if !self.presentation.live_mode || !self.presentation.final_text || self.model.items.iter().any(|i| i.id == id && i.text.trim().is_empty()) { self.model.dismiss_id(id); }
                 }
             }
         }
@@ -545,9 +546,9 @@ impl Render for Overlay {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let item = self.model.visible();
         let phase = item.map(|i| i.phase);
-        let circular = presentation::surface(self.presentation, phase, self.model.error.is_some()) == presentation::Surface::Circle;
+        let circular = presentation::surface(self.presentation, phase, self.model.error.is_some(), self.model.history_view) != presentation::Surface::Transcript;
         let recording = phase == Some(Phase::Recording);
-        let busy = matches!(phase, Some(Phase::Receiving | Phase::Finalizing));
+        let busy = matches!(phase, Some(Phase::Receiving | Phase::Reconnecting | Phase::Finalizing));
         let editable = phase == Some(Phase::Ready) && self.model.error.is_none();
         let (_, text, body_height, _) = self.panel_layout(window);
         div()
@@ -771,7 +772,7 @@ fn main() -> anyhow::Result<()> {
                             Message::Control(event, generation) if accepts_generation(this.backend.as_ref().map(|b| b.generation), generation) => {
                                 if event["type"] == "gesture" { this.gesture(&event, window, cx); }
                                 if event["type"] == "audio_level" {
-                                    let active = !this.presentation.live_text && this.model.visible().is_some_and(|item|
+                                    let active = !this.presentation.live_mode && this.model.visible().is_some_and(|item|
                                         item.phase == Phase::Recording && (item.recording.is_none() || item.recording.as_deref() == event["recording"].as_str()));
                                     unsafe { index_panel_audio(event["level"].as_f64().unwrap_or(0.), active); }
                                 }
@@ -802,7 +803,7 @@ fn main() -> anyhow::Result<()> {
                             Message::Menu(5) => {
                                 // Outside clicks may change the user's focus, but must not
                                 // dismiss a recording whose result is still arriving.
-                                if !this.model.visible().is_some_and(|item| matches!(item.phase, Phase::Recording | Phase::Receiving | Phase::Finalizing)) {
+                                if !this.model.visible().is_some_and(|item| matches!(item.phase, Phase::Recording | Phase::Receiving | Phase::Reconnecting | Phase::Finalizing)) {
                                     this.dismiss(&Dismiss, window, cx);
                                 }
                             },

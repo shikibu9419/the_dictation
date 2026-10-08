@@ -421,6 +421,19 @@ impl Recognition {
                     }
                     InputEvent::Checkpoint(value) => self.batch.send(Job::Checkpoint(value))?,
                     InputEvent::Audio(part) => self.add(part)?,
+                    InputEvent::Interrupted(key) => {
+                        self.release(&key)?;
+                        emit(json!({"type":"interrupted", "recording":key}));
+                    }
+                    InputEvent::Cancel(key) => {
+                        self.release(&key)?;
+                        self.audio.remove(&key);
+                        let mut life = self.lifecycle.lock().unwrap();
+                        life.finished.insert(key.clone());
+                        life.retire(&key);
+                        self.output.debug(format!("Recording cancelled key={key}; disconnect timeout=5s; no batch recognition"));
+                        emit(json!({"type":"cancelled", "recording":key}));
+                    }
                     InputEvent::Activity { key, collecting } => {
                         self.lifecycle.lock().unwrap().collecting = Some(collecting);
                         self.output.debug(format!(

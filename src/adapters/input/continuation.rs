@@ -88,7 +88,9 @@ impl Continuation {
         }
         let mut result = self.poll(output);
         match event {
-            event @ InputEvent::Activity { .. } => result.push(event),
+            event @ (InputEvent::Interrupted(_)
+            | InputEvent::Cancel(_)
+            | InputEvent::Activity { .. }) => result.push(event),
             InputEvent::Checkpoint(value) => result.push(InputEvent::Checkpoint(value)),
             InputEvent::Gesture(event) => result.push(InputEvent::Gesture(event)),
             InputEvent::State(pressed) => {

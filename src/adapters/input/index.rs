@@ -153,7 +153,7 @@ impl InputAdapter for IndexInput {
                     self.interaction
                         .apply(self.continuation.connection_lost(output)),
                 );
-                output.debug("Desktop interaction: connection_lost -> Error; recording indicators stopped; audio recovery retained");
+                output.debug("Desktop interaction: connection_lost -> Error; wait 5s then cancel; no recognition from recovered audio");
                 return Ok(result);
             }
             Some("caught_up") => {
@@ -163,6 +163,9 @@ impl InputAdapter for IndexInput {
                 return Ok(vec![]);
             }
             _ => {}
+        }
+        if !self.save_cursor {
+            return self.decode_raw(message, output);
         }
         let trigger = message["type"].as_str().unwrap_or("unknown").to_owned();
         let before = self.interaction.state();
@@ -197,7 +200,7 @@ impl InputAdapter for IndexInput {
         let threshold_events = self.interaction.poll(Instant::now());
         if !threshold_events.is_empty() {
             output.debug(format!(
-                "Desktop interaction: hold threshold elapsed; state={:?}",
+                "Desktop interaction: timer fired; state={:?}",
                 self.interaction.state()
             ));
             self.gestures.hold_started();

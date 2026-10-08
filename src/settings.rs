@@ -63,13 +63,14 @@ impl Default for GestureBindings {
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(default, deny_unknown_fields)]
 pub struct Presentation {
-    pub live_text: bool,
+    #[serde(alias = "live_text")]
+    pub live_mode: bool,
     pub final_text: bool,
 }
 impl Default for Presentation {
     fn default() -> Self {
         Self {
-            live_text: true,
+            live_mode: true,
             final_text: true,
         }
     }
@@ -82,7 +83,7 @@ pub struct RecognitionPlan {
 impl Settings {
     pub fn recognition_plan(&self) -> RecognitionPlan {
         RecognitionPlan {
-            live: self.presentation.live_text.then_some(self.speech),
+            live: self.presentation.live_mode.then_some(self.speech),
             batch: self.batch_speech.unwrap_or(self.speech),
         }
     }
@@ -164,6 +165,16 @@ impl Settings {
 mod tests {
     use super::*;
     #[test]
+    fn old_live_text_setting_migrates_without_turning_live_mode_on() {
+        let p: Presentation =
+            serde_json::from_value(serde_json::json!({"live_text":false,"final_text":true}))
+                .unwrap();
+        assert!(!p.live_mode);
+        let saved = serde_json::to_value(p).unwrap();
+        assert_eq!(saved["live_mode"], false);
+        assert!(saved.get("live_text").is_none());
+    }
+    #[test]
     fn defaults_preserve_index_and_apple() {
         let dir = tempfile::tempdir().unwrap();
         assert_eq!(
@@ -205,11 +216,11 @@ mod tests {
             batch_speech: Some(SpeechModel::OnDevice),
             ..Settings::default()
         };
-        settings.presentation.live_text = false;
+        settings.presentation.live_mode = false;
         settings.presentation.final_text = false;
         assert_eq!(settings.recognition_plan().live, None);
         assert_eq!(settings.recognition_plan().batch, SpeechModel::OnDevice);
-        settings.presentation.live_text = true;
+        settings.presentation.live_mode = true;
         assert_eq!(settings.recognition_plan().live, Some(SpeechModel::Apple));
         assert_eq!(settings.recognition_plan().batch, SpeechModel::OnDevice);
     }

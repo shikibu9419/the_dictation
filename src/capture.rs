@@ -22,6 +22,7 @@ struct Received {
     output: Output,
     collecting: Option<bool>,
     inactive_since: Option<Instant>,
+    raw_press_since: Option<Instant>,
 }
 impl Received {
     fn send(&self, event: Value) -> Result<()> {
@@ -31,6 +32,15 @@ impl Received {
         Ok(())
     }
     fn state(&mut self, state: &RingState) -> Result<()> {
+        if state.in_collection_state && self.raw_press_since.is_none() {
+            self.raw_press_since = Some(Instant::now());
+            self.output
+                .debug("Button timing: collecting rising edge (receiver observation)");
+        } else if !state.in_collection_state
+            && let Some(start) = self.raw_press_since.take()
+        {
+            self.output.debug(format!("Button timing: collecting falling edge; observed_ms={}; source=ring_state; not physical button duration", start.elapsed().as_millis()));
+        }
         self.send(json!({"type":"button_state","pressed":state.in_collection_state}))?;
         if state.in_collection_state {
             self.inactive_since = None;
@@ -199,6 +209,7 @@ async fn receive(
         output: output.clone(),
         collecting: None,
         inactive_since: None,
+        raw_press_since: None,
     };
     output.event(&json!({"type":"ready"}));
     let mut paired = false;
@@ -349,6 +360,7 @@ mod gui_tests {
             output,
             collecting: None,
             inactive_since: None,
+            raw_press_since: None,
         };
         let mut state = crate::bluetooth::advertisement(&[0, 0, 0, 0, 0, 0]).unwrap();
         received.state(&state).unwrap();

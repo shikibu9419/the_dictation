@@ -254,7 +254,7 @@ impl Render for SettingsView {
                             .flex()
                             .flex_col()
                             .gap(px(8.))
-                            .child("録音中の文字起こし")
+                            .child("ライブ変換モード")
                             .child(
                                 div()
                                     .flex()
@@ -262,12 +262,12 @@ impl Render for SettingsView {
                                     .child(
                                         choice(
                                             "live-show",
-                                            "表示する",
-                                            self.settings.presentation.live_text,
+                                            "オン",
+                                            self.settings.presentation.live_mode,
                                         )
                                         .on_click(
                                             cx.listener(|this, _, _, cx| {
-                                                this.settings.presentation.live_text = true;
+                                                this.settings.presentation.live_mode = true;
                                                 cx.notify();
                                             }),
                                         ),
@@ -275,12 +275,12 @@ impl Render for SettingsView {
                                     .child(
                                         choice(
                                             "live-hide",
-                                            "非表示・ライブ認識しない",
-                                            !self.settings.presentation.live_text,
+                                            "オフ（履歴以外は文字を表示しない）",
+                                            !self.settings.presentation.live_mode,
                                         )
                                         .on_click(
                                             cx.listener(|this, _, _, cx| {
-                                                this.settings.presentation.live_text = false;
+                                                this.settings.presentation.live_mode = false;
                                                 cx.notify();
                                             }),
                                         ),
@@ -292,7 +292,7 @@ impl Render for SettingsView {
                             .flex()
                             .flex_col()
                             .gap(px(8.))
-                            .child("認識完了後の結果")
+                            .child("ライブ変換モード時の完了結果")
                             .child(
                                 div()
                                     .flex()

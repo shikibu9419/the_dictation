@@ -24,6 +24,8 @@ pub enum InputEvent {
     Discard(String),
     Flush,
     Checkpoint(Value),
+    Interrupted(String),
+    Cancel(String),
 }
 
 /// Source-specific decoding and persistence stay on this side of the PCM boundary.

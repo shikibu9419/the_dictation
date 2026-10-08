@@ -13,7 +13,7 @@ pub enum State {
     Error,
 }
 
-const HOLD_THRESHOLD: Duration = Duration::from_millis(350);
+const HOLD_THRESHOLD: Duration = Duration::from_millis(150);
 
 /// Desktop interaction state. Unclassified button edges never activate the UI.
 #[derive(Default)]
@@ -26,6 +26,12 @@ pub struct Interaction {
     collecting: Option<bool>,
     released: Option<Instant>,
     announced: HashMap<String, bool>,
+    release_confirmed: bool,
+    authorized: HashSet<String>,
+    held_finals: HashMap<String, super::AudioChunk>,
+    aborted: HashSet<String>,
+    interrupted_at: Option<Instant>,
+    require_press: bool,
 }
 impl Interaction {
     pub fn state(&self) -> State {
@@ -57,6 +63,18 @@ impl Interaction {
         grace: Duration,
     ) -> Vec<InputEvent> {
         let previous = self.collecting.replace(pressed);
+        if self.interrupted_at.is_some() {
+            return vec![];
+        }
+        if pressed && previous == Some(false) {
+            self.require_press = false;
+        }
+        if pressed && previous != Some(true) {
+            self.release_confirmed = false;
+        }
+        if !pressed && previous == Some(true) {
+            self.release_confirmed = true;
+        }
         let resume = pressed
             && previous != Some(true)
             && self.released.is_some_and(|t| now.duration_since(t) < grace);
@@ -67,6 +85,11 @@ impl Interaction {
         if !pressed || resume {
             for key in self.recordings.clone() {
                 self.activity(&key, pressed, &mut events);
+                if pressed {
+                    self.authorized.remove(&key);
+                } else if self.release_confirmed {
+                    self.authorized.insert(key);
+                }
             }
             if !self.recordings.is_empty() {
                 self.state = if pressed {
@@ -76,12 +99,22 @@ impl Interaction {
                 };
             }
         }
+        if !pressed && self.release_confirmed {
+            let finals = std::mem::take(&mut self.held_finals);
+            for (key, part) in finals {
+                self.authorized.insert(key);
+                events.extend(self.apply(vec![InputEvent::Audio(part)]));
+            }
+        }
         events
     }
     fn activate(&mut self, recording: bool) -> Vec<InputEvent> {
         let mut events = vec![];
         for part in std::mem::take(&mut self.buffered) {
             self.recordings.insert(part.key.clone());
+            if !recording && self.release_confirmed {
+                self.authorized.insert(part.key.clone());
+            }
             self.activity(&part.key, recording, &mut events);
             events.push(InputEvent::Audio(part));
         }
@@ -95,6 +128,21 @@ impl Interaction {
         events
     }
     pub fn poll(&mut self, now: Instant) -> Vec<InputEvent> {
+        if let Some(start) = self.interrupted_at {
+            if now.duration_since(start) < Duration::from_secs(5) {
+                return vec![];
+            }
+            self.interrupted_at = None;
+            let keys = std::mem::take(&mut self.recordings);
+            self.buffered.clear();
+            self.held_finals.clear();
+            self.authorized.clear();
+            self.state = State::Idle;
+            for key in &keys {
+                self.announced.remove(key);
+            }
+            return keys.into_iter().map(InputEvent::Cancel).collect();
+        }
         // A receiver state can outlive a short tap while BLE catches up. Require
         // actual audio as well, so an empty tap never opens a placeholder panel.
         if self
@@ -108,9 +156,14 @@ impl Interaction {
     pub fn complete(&mut self, key: &str) {
         self.pending.remove(key);
         self.announced.remove(key);
+        self.authorized.remove(key);
         self.settle();
     }
     fn settle(&mut self) {
+        if self.interrupted_at.is_some() {
+            self.state = State::Error;
+            return;
+        }
         if self.recordings.is_empty() && self.buffered.is_empty() {
             self.state = if self.pending.is_empty() {
                 State::Idle
@@ -121,38 +174,46 @@ impl Interaction {
     }
     pub fn disconnected(&mut self) -> Vec<InputEvent> {
         self.pressed_since = None;
-        self.collecting = Some(false);
-        let mut events = vec![];
-        for key in self.recordings.clone() {
-            self.activity(&key, false, &mut events);
-        }
+        self.collecting = None;
+        self.release_confirmed = false;
+        self.require_press = true;
+        self.interrupted_at.get_or_insert_with(Instant::now);
+        self.aborted.extend(self.recordings.iter().cloned());
+        self.aborted
+            .extend(self.buffered.iter().map(|p| p.key.clone()));
+        self.buffered.clear();
         self.state = State::Error;
-        events
+        self.recordings
+            .iter()
+            .cloned()
+            .map(InputEvent::Interrupted)
+            .collect()
     }
     pub fn ready(&mut self) {
-        if self.state == State::Error {
-            self.state = State::Dictating;
-            self.settle();
-        }
+        // Connectivity is not a release or permission to recognize old audio.
     }
 
     pub fn apply(&mut self, events: Vec<InputEvent>) -> Vec<InputEvent> {
         let mut result = vec![];
         for event in events {
             match event {
-                InputEvent::State(true) => {} // Raw input is only a candidate.
-                InputEvent::State(false) => {
-                    // A complete nonempty recording is authoritative even when
-                    // its button notifications were missed during BLE recovery.
-                    result.extend(self.activate(false));
-                    for key in self.recordings.clone() {
-                        self.activity(&key, false, &mut result);
-                    }
-                    if !self.recordings.is_empty() {
-                        self.state = State::Dictating;
-                    }
-                }
+                InputEvent::State(_) => {} // Continuation/EOF cannot infer physical release.
                 InputEvent::Audio(part) => {
+                    if self.interrupted_at.is_some()
+                        || self.require_press
+                        || self.aborted.contains(&part.key)
+                    {
+                        self.aborted.insert(part.key.clone());
+                        if part.final_part {
+                            self.aborted.remove(&part.key);
+                        }
+                        if part.final_part
+                            && let Some(checkpoint) = part.checkpoint
+                        {
+                            result.push(InputEvent::Checkpoint(checkpoint));
+                        }
+                        continue;
+                    }
                     let known = self.recordings.contains(&part.key);
                     if !known && !part.final_part {
                         if !part.samples.is_empty() {
@@ -173,13 +234,21 @@ impl Interaction {
                         continue;
                     }
                     if part.final_part {
-                        result.extend(self.activate(false));
+                        result.extend(self.activate(!self.release_confirmed));
                         if !self.recordings.contains(&part.key) && part.samples.is_empty() {
                             if let Some(checkpoint) = part.checkpoint {
                                 result.push(InputEvent::Checkpoint(checkpoint));
                             }
                             self.settle();
                             continue;
+                        }
+                        if !self.authorized.contains(&part.key) {
+                            if self.release_confirmed {
+                                self.authorized.insert(part.key.clone());
+                            } else {
+                                self.held_finals.insert(part.key.clone(), part);
+                                continue;
+                            }
                         }
                         self.activity(&part.key, false, &mut result);
                         self.recordings.remove(&part.key);
@@ -221,6 +290,70 @@ mod tests {
         })
     }
     #[test]
+    fn recording_starts_at_150ms_of_audio_without_waiting_for_a_second_large_chunk() {
+        let mut gate = Interaction::default();
+        assert!(
+            gate.apply(vec![audio("hold", vec![1; 2399], false)])
+                .is_empty()
+        );
+        let events = gate.apply(vec![audio("hold", vec![1], false)]);
+        assert!(matches!(
+            events.first(),
+            Some(InputEvent::Activity {
+                collecting: true,
+                ..
+            })
+        ));
+        let samples: usize = events
+            .iter()
+            .map(|event| match event {
+                InputEvent::Audio(p) => p.samples.len(),
+                _ => 0,
+            })
+            .sum();
+        assert_eq!(samples, 2400);
+    }
+    #[test]
+    fn resumed_press_requires_its_own_release_before_dictation() {
+        let mut gate = Interaction::default();
+        let now = Instant::now();
+        let grace = Duration::from_millis(500);
+        gate.observe_state(true, now, grace);
+        gate.apply(vec![audio("resume", vec![1; 5600], false)]);
+        gate.observe_state(false, now + Duration::from_secs(1), grace);
+        gate.observe_state(true, now + Duration::from_millis(1200), grace);
+        assert_eq!(gate.state(), State::Recording);
+        assert!(
+            gate.apply(vec![audio("resume", vec![1; 100], true)])
+                .is_empty()
+        );
+        let end = gate.observe_state(false, now + Duration::from_secs(2), grace);
+        assert!(matches!(end.last(), Some(InputEvent::Audio(p)) if p.final_part));
+        assert_eq!(gate.state(), State::Dictating);
+    }
+    #[test]
+    fn audio_eof_cannot_start_dictation_without_a_release_edge() {
+        let mut gate = Interaction::default();
+        let now = Instant::now();
+        gate.observe_state(true, now, Duration::from_millis(500));
+        gate.apply(vec![audio("held", vec![1; 5600], false)]);
+        let eof = gate.apply(vec![
+            InputEvent::State(false),
+            audio("held", vec![1; 200], true),
+        ]);
+        assert!(eof.is_empty());
+        assert_eq!(gate.state(), State::Recording);
+        let release = gate.observe_state(
+            false,
+            now + Duration::from_secs(1),
+            Duration::from_millis(500),
+        );
+        assert!(
+            matches!(release.as_slice(), [InputEvent::Activity { collecting: false, .. }, InputEvent::Audio(p)] if p.final_part && p.samples.len() == 200)
+        );
+        assert_eq!(gate.state(), State::Dictating);
+    }
+    #[test]
     fn release_stops_indicator_before_delayed_eof_and_recovery_never_restarts_it() {
         let now = Instant::now();
         let mut state = Interaction::default();
@@ -241,10 +374,19 @@ mod tests {
             }]
         ));
         assert_eq!(state.state(), State::Dictating);
-        assert!(state.disconnected().is_empty());
+        assert!(matches!(
+            state.disconnected().as_slice(),
+            [InputEvent::Interrupted(_)]
+        ));
+        let interrupted = state.interrupted_at.unwrap();
+        assert!(
+            state
+                .poll(interrupted + Duration::from_millis(4999))
+                .is_empty()
+        );
         for _ in 0..53 {
             let events = state.apply(vec![audio("2351", vec![2; 2400], false)]);
-            assert!(events.iter().all(|e| matches!(e, InputEvent::Audio(_))));
+            assert!(events.is_empty());
         }
         let end = state.apply(vec![InputEvent::State(false), audio("2351", vec![], true)]);
         assert!(end.iter().all(|e| !matches!(
@@ -254,8 +396,10 @@ mod tests {
                 ..
             }
         )));
-        assert!(matches!(end.last(), Some(InputEvent::Audio(p)) if p.final_part));
-        state.complete("2351");
+        assert!(end.iter().all(|e| matches!(e, InputEvent::Checkpoint(_))));
+        assert!(
+            matches!(state.poll(interrupted + Duration::from_secs(5)).as_slice(), [InputEvent::Cancel(key)] if key == "2351")
+        );
         assert_eq!(state.state(), State::Idle);
     }
     #[test]
@@ -336,12 +480,13 @@ mod tests {
         );
         let now = Instant::now();
         gate.button(true, now);
+        gate.observe_state(true, now, Duration::from_millis(500));
         assert!(
             gate.apply(vec![audio("joined", vec![0; 100], false)])
                 .is_empty()
         );
-        assert!(gate.poll(now + Duration::from_millis(349)).is_empty());
-        let events = gate.poll(now + Duration::from_millis(350));
+        assert!(gate.poll(now + Duration::from_millis(149)).is_empty());
+        let events = gate.poll(now + Duration::from_millis(150));
         assert!(matches!(
             events.first(),
             Some(InputEvent::Activity {
@@ -350,6 +495,11 @@ mod tests {
             })
         ));
         assert!(matches!(&events[1], InputEvent::Audio(p) if p.samples.len() == 100));
+        gate.observe_state(
+            false,
+            now + Duration::from_secs(1),
+            Duration::from_millis(500),
+        );
         let next = gate.apply(vec![
             InputEvent::State(true),
             audio("joined", vec![1; 100], false),
@@ -365,6 +515,13 @@ mod tests {
     #[test]
     fn completed_real_audio_is_not_treated_as_a_tap() {
         let mut gate = Interaction::default();
+        let now = Instant::now();
+        gate.observe_state(true, now, Duration::from_millis(500));
+        gate.observe_state(
+            false,
+            now + Duration::from_secs(1),
+            Duration::from_millis(500),
+        );
         assert!(
             matches!(gate.apply(vec![audio("held", vec![0; 5000], true)]).as_slice(), [InputEvent::Activity { collecting: false, .. }, InputEvent::Audio(p)] if p.samples.len() == 5000)
         );

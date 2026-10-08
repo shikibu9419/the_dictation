@@ -28,6 +28,7 @@ impl Event {
 pub enum Phase {
     Recording,
     Receiving,
+    Reconnecting,
     Finalizing,
     Ready,
     Failed,
@@ -51,6 +52,7 @@ pub struct Model {
     pub items: Vec<Item>,
     pub error: Option<String>,
     pub ready: bool,
+    pub history_view: bool,
     collecting: bool,
     active: Option<u64>,
     capturing: Option<u64>,
@@ -61,7 +63,7 @@ impl Model {
         self.items.iter().any(|item| {
             matches!(
                 item.phase,
-                Phase::Recording | Phase::Receiving | Phase::Finalizing
+                Phase::Recording | Phase::Receiving | Phase::Reconnecting | Phase::Finalizing
             )
         })
     }
@@ -72,6 +74,7 @@ impl Model {
             .find(|i| Some(i.id) == self.active && !i.dismissed)
     }
     fn add(&mut self, recording: Option<String>, phase: Phase, target: i32) {
+        self.history_view = false;
         self.next += 1;
         self.items.push(Item {
             id: self.next,
@@ -86,6 +89,18 @@ impl Model {
     pub fn accept(&mut self, e: Event, target: i32) {
         match e.r#type.as_str() {
             "ready" => self.ready = true,
+            "interrupted" | "cancelled" => {
+                if let Some(item) = self.items.iter_mut().find(|i| i.recording == e.recording && e.recording.is_some()) {
+                    if e.r#type == "interrupted" {
+                        item.phase = Phase::Reconnecting;
+                    } else {
+                        item.phase = Phase::Failed;
+                        item.dismissed = true;
+                        if self.active == Some(item.id) { self.active = None; }
+                    }
+                }
+                self.prune();
+            }
             "activity" => {
                 let (Some(key), Some(collecting)) = (e.recording, e.collecting) else { return };
                 let phase = if collecting { Phase::Recording } else { Phase::Receiving };
@@ -106,7 +121,7 @@ impl Model {
                         self.error = None;
                         // A BLE state edge has no recording identity. Keep the
                         // current transcript until audio confirms the next one.
-                        let previous = self.visible().filter(|i| !i.text.is_empty() && matches!(i.phase, Phase::Recording | Phase::Receiving | Phase::Finalizing)).map(|i| i.id);
+                        let previous = self.visible().filter(|i| !i.text.is_empty() && matches!(i.phase, Phase::Recording | Phase::Receiving | Phase::Reconnecting | Phase::Finalizing)).map(|i| i.id);
                         self.add(None, Phase::Recording, target);
                         self.capturing = self.active;
                         if previous.is_some() { self.active = previous; }
@@ -121,7 +136,7 @@ impl Model {
             "recording" => {
                 // A tap can still yield an empty result, but must not replace
                 // another recording that is awaiting its final transcript.
-                if e.empty && self.visible().is_some_and(|i| matches!(i.phase, Phase::Recording | Phase::Receiving | Phase::Finalizing)) {
+                if e.empty && self.visible().is_some_and(|i| matches!(i.phase, Phase::Recording | Phase::Receiving | Phase::Reconnecting | Phase::Finalizing)) {
                     return;
                 }
                 if let Some(key) = e.recording
@@ -176,7 +191,7 @@ impl Model {
                         item.text = e.text.unwrap_or_default()
                     }
                     _ if e.mode.as_deref() == Some("batch")
-                        && matches!(item.phase, Phase::Recording | Phase::Receiving | Phase::Finalizing) =>
+                        && matches!(item.phase, Phase::Recording | Phase::Receiving | Phase::Reconnecting | Phase::Finalizing) =>
                     {
                         item.phase = Phase::Finalizing;
                         if let Some(text) = e.text.filter(|text| !text.is_empty()) {
@@ -194,7 +209,7 @@ impl Model {
                 for item in &mut self.items {
                     if matches!(
                         item.phase,
-                        Phase::Recording | Phase::Receiving | Phase::Finalizing
+                        Phase::Recording | Phase::Receiving | Phase::Reconnecting | Phase::Finalizing
                     ) {
                         item.phase = Phase::Failed;
                     }
@@ -251,6 +266,7 @@ impl Model {
         }.map(|i| i.id);
         let Some(id) = candidate else { return false };
         self.active = Some(id);
+        self.history_view = true;
         let item = self.items.iter_mut().find(|i| i.id == id).unwrap();
         item.dismissed = false;
         item.target = target;
@@ -259,6 +275,7 @@ impl Model {
     pub fn open_history(&mut self, target: i32) {
         self.active = None;
         if !self.browse(true, target) { self.add(None, Phase::Ready, target); }
+        self.history_view = true;
     }
     pub fn edit(&mut self, id: u64, text: String) {
         if let Some(item) = self
@@ -294,6 +311,20 @@ mod tests {
             m,
             json!({"type":"text","recording":key,"text":text,"mode":mode,"final":final_result}),
         );
+    }
+    #[test]
+    fn disconnect_wait_then_cancel_removes_processing_without_history() {
+        let mut m = Model::default();
+        send(&mut m, json!({"type":"activity","recording":"lost","collecting":true}));
+        send(&mut m, json!({"type":"interrupted","recording":"lost"}));
+        assert_eq!(m.visible().unwrap().phase, Phase::Reconnecting);
+        send(&mut m, json!({"type":"cancelled","recording":"lost"}));
+        assert!(m.visible().is_none());
+        assert!(!m.has_inflight());
+        assert!(m.history().is_empty());
+        text(&mut m, "lost", "stale", "batch", true);
+        assert!(m.visible().is_none());
+        assert!(m.history().is_empty());
     }
     #[test]
     fn keyed_activity_is_atomic_and_resume_keeps_the_same_item() {
