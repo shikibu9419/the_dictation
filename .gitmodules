@@ -1,0 +1,3 @@
+[submodule "native/qwen-rs/vendor/mlx-c"]
+	path = native/qwen-rs/vendor/mlx-c
+	url = https://github.com/ml-explore/mlx-c.git

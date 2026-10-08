@@ -1,0 +1,10 @@
+Qwen native inference includes code derived from second-state/qwen3_asr_rs
+https://github.com/second-state/qwen3_asr_rs
+Revision 3fa673441682350b12da5c21429fea71ce212023 (Apache-2.0).
+Modified for Index Voice: MLX-only, packed 8-bit weights, corrected frontend,
+activation fusion, reusable encoder/decoder prefixes, cancellation, and tests.
+
+MLX and mlx-c are Copyright Apple Inc., MIT.
+mlx-c: a1290d221f92bd020af805b7d14207eee4ec973b (v0.5.0)
+MLX: 185b06d9efc1c869540eccfb5baff853fff3659d (v0.30.6).
+See vendor/mlx-c/LICENSE and MLX-LICENSE.
