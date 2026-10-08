@@ -24,6 +24,7 @@ unsafe extern "C" {
     fn index_panel_setup(view: *mut c_void, callback: extern "C" fn(i32));
     fn index_frontmost_pid() -> i32;
     fn index_panel_show(target: i32);
+    fn index_panel_request_frame();
     fn index_panel_editing(editing: bool);
     fn index_panel_hide();
     fn index_panel_audio(level: f64, active: bool);
@@ -188,6 +189,7 @@ struct Overlay {
     editing: Option<u64>,
     panel_height: f32,
     panel_circular: bool,
+    presentation_revision: u64,
     presentation: settings::Presentation,
     copied: std::collections::HashSet<String>,
     gestures: settings::GestureBindings,
@@ -231,7 +233,61 @@ impl Overlay {
         });
     }
 
+    fn panel_layout(&self, window: &mut Window) -> (bool, String, f32, f32) {
+        let item = self.model.visible();
+        let phase = item.map(|i| i.phase);
+        let circular = presentation::surface(self.presentation, phase, self.model.error.is_some()) == presentation::Surface::Circle;
+        let text = self
+            .model
+            .error
+            .clone()
+            .or_else(|| item.filter(|i| !i.text.is_empty()).map(|i| i.text.clone()))
+            .unwrap_or_else(|| {
+                match phase {
+                    Some(Phase::Ready) => "音声を認識できませんでした",
+                    Some(Phase::Receiving) => "録音を受信中…",
+                    Some(Phase::Finalizing) => "全文を文字起こし中…",
+                    _ => "話してください…",
+                }
+                .into()
+            });
+        // The editor and live label use the same width and line metrics.
+        let measured = window
+            .text_system()
+            .shape_text(
+                text.clone().into(),
+                px(22.5),
+                &[TextRun {
+                    len: text.len(),
+                    font: font(".AppleSystemUIFont"),
+                    color: rgb(0xf3f6fa).into(),
+                    background_color: None,
+                    underline: None,
+                    strikethrough: None,
+                }],
+                Some(px(487.)),
+                None,
+            )
+            .map(|lines| {
+                lines
+                    .iter()
+                    .map(|line| f32::from(line.size(px(30.)).height))
+                    .sum::<f32>()
+            })
+            .unwrap_or(30.);
+        let body_height = measured.clamp(30., 300.);
+        let height = if circular { 96. } else { body_height + 44. };
+        (circular, text, body_height, height)
+    }
     fn update_panel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.presentation_revision = self.presentation_revision.wrapping_add(1);
+        let (circular, _, _, height) = self.panel_layout(window);
+        if self.panel_height != height || self.panel_circular != circular {
+            self.panel_height = height;
+            self.panel_circular = circular;
+            unsafe { index_panel_resize(if circular { 96. } else { 580. }, height as f64, circular); }
+        }
+
         if self.presentation.live_text || !self.model.visible().is_some_and(|item| item.phase == Phase::Recording) {
             unsafe { index_panel_audio(0., false); }
         }
@@ -294,12 +350,23 @@ impl Overlay {
                 {
                     eprintln!("[GUI] Capture paste target: {error:#}");
                 }
-                index_panel_show(pid);
-                if self.editing.is_some() {
-                    self.input.update(cx, |input, cx| input.focus(window, cx));
-                } else {
-                    window.focus(&self.focus);
-                }
+                // Update has queued geometry; render must complete before showing.
+                // Only then may a still-current presentation become visible.
+                let revision = self.presentation_revision;
+                cx.on_next_frame(window, move |this, window, cx| {
+                    if this.presentation_revision != revision || this.pasting || !this.shown {
+                        return;
+                    }
+                    index_panel_show(pid);
+                    if this.editing.is_some() {
+                        this.input.update(cx, |input, cx| input.focus(window, cx));
+                    } else {
+                        window.focus(&this.focus);
+                    }
+                });
+                // A hidden macOS window has stopped its display link.
+                // Force a frame after geometry, without making it visible.
+                index_panel_request_frame();
             } else if !visible && self.shown {
                 index_panel_hide();
             }
@@ -482,53 +549,7 @@ impl Render for Overlay {
         let recording = phase == Some(Phase::Recording);
         let busy = matches!(phase, Some(Phase::Receiving | Phase::Finalizing));
         let editable = phase == Some(Phase::Ready) && self.model.error.is_none();
-        let text = self
-            .model
-            .error
-            .clone()
-            .or_else(|| item.filter(|i| !i.text.is_empty()).map(|i| i.text.clone()))
-            .unwrap_or_else(|| {
-                match phase {
-                    Some(Phase::Ready) => "音声を認識できませんでした",
-                    Some(Phase::Receiving) => "録音を受信中…",
-                    Some(Phase::Finalizing) => "全文を文字起こし中…",
-                    _ => "話してください…",
-                }
-                .into()
-            });
-        // The editor and live label use the same width and line metrics.
-        let measured = window
-            .text_system()
-            .shape_text(
-                text.clone().into(),
-                px(22.5),
-                &[TextRun {
-                    len: text.len(),
-                    font: font(".AppleSystemUIFont"),
-                    color: rgb(0xf3f6fa).into(),
-                    background_color: None,
-                    underline: None,
-                    strikethrough: None,
-                }],
-                Some(px(487.)),
-                None,
-            )
-            .map(|lines| {
-                lines
-                    .iter()
-                    .map(|line| f32::from(line.size(px(30.)).height))
-                    .sum::<f32>()
-            })
-            .unwrap_or(30.);
-        let body_height = measured.clamp(30., 300.);
-        let height = if circular { 96. } else { body_height + 44. };
-        if self.panel_height != height || self.panel_circular != circular {
-            self.panel_height = height;
-            self.panel_circular = circular;
-            unsafe {
-                index_panel_resize(if circular { 96. } else { 580. }, height as f64, circular);
-            }
-        }
+        let (_, text, body_height, _) = self.panel_layout(window);
         div()
             .id("dictation")
             .track_focus(&self.focus)
@@ -735,7 +756,7 @@ fn main() -> anyhow::Result<()> {
                         cx.notify();
                     }
                 });
-                let mut view = Overlay { model: load_model(), focus: cx.focus_handle(), backend: None, backend_path, verbose, shown: false, shown_item: None, pasting: false, log, scroll: ScrollHandle::new(), input, editing: None, panel_height: 0., panel_circular: false, presentation: settings::Settings::load().map(|s| s.presentation).unwrap_or_default(), copied: Default::default(), gestures: settings::Settings::load().map(|s| s.gestures).unwrap_or_default(), gesture_request: 1_000_000_000, settings_window: None, _subscriptions: vec![subscription] };
+                let mut view = Overlay { model: load_model(), focus: cx.focus_handle(), backend: None, backend_path, verbose, shown: false, shown_item: None, pasting: false, log, scroll: ScrollHandle::new(), input, editing: None, panel_height: 0., panel_circular: false, presentation_revision: 0, presentation: settings::Settings::load().map(|s| s.presentation).unwrap_or_default(), copied: Default::default(), gestures: settings::Settings::load().map(|s| s.gestures).unwrap_or_default(), gesture_request: 1_000_000_000, settings_window: None, _subscriptions: vec![subscription] };
                 if !preview { view.start(window, cx); }
                 cx.spawn_in(window, async move |this, cx| {
                     while let Some(message) = events.next().await {

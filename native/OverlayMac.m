@@ -235,6 +235,14 @@ void index_panel_resize(double width, double height, bool circular) {
 
     });
 }
+// Hidden windows have no display-link ticks. Explicitly render the prepared
+// surface before the queued show operation; run outside GPUI's App borrow.
+void index_panel_request_frame(void) {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        [gpuiView.layer setNeedsDisplay];
+        [gpuiView.layer displayIfNeeded];
+    });
+}
 static void activateTextInput(void) {
     if (!editingText || !panel.isVisible) return;
     [NSApp activateIgnoringOtherApps:YES];

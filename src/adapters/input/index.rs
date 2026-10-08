@@ -1,5 +1,6 @@
 use super::continuation::Continuation;
 use super::gestures::{Detector, Hooks, LogHook, Press};
+use super::interaction::Interaction;
 use super::{AudioChunk, InputAdapter, InputEvent, pcm::PcmInput};
 use crate::{config, output::Output, recordings::Recordings};
 use anyhow::{Context, Result, ensure};
@@ -9,8 +10,10 @@ use std::time::{Duration, Instant};
 
 pub struct IndexInput {
     recordings: Recordings,
+    interaction: Interaction,
     address: String,
     save_cursor: bool,
+    resume_grace: Duration,
     continuation: Continuation,
     gestures: Detector,
     gesture_hooks: Hooks,
@@ -27,8 +30,10 @@ impl IndexInput {
         gesture_hooks.register(LogHook);
         Ok(Self {
             recordings: Recordings::default(),
+            interaction: Interaction::default(),
             address: address.into(),
             save_cursor,
+            resume_grace: Duration::from_millis(ms),
             gestures: Detector::new(Duration::from_millis(500)),
             gesture_hooks,
             gestures_live: false,
@@ -50,7 +55,7 @@ impl IndexInput {
                     STANDARD.decode(message["raw"].as_str().context("Missing raw collection")?)?;
                 let parts = self.recordings.add(index, &raw, output)?;
                 let mut detected = None;
-                if self.gestures_live {
+                if self.gestures_live && self.interaction.accepts_taps() {
                     // Use explicit button metadata plus the existing short-audio
                     // classification. Do not count cumulative sequence entries
                     // again every time they appear in an audio collection.
@@ -122,33 +127,93 @@ impl IndexInput {
 impl InputAdapter for IndexInput {
     fn decode(&mut self, message: Value, output: &Output) -> Result<Vec<InputEvent>> {
         match message["type"].as_str() {
+            Some("button_state") => {
+                let pressed = message["pressed"]
+                    .as_bool()
+                    .context("Missing button state")?;
+                if !self.gestures_live {
+                    return Ok(vec![]);
+                }
+                let now = Instant::now();
+                self.interaction.button(pressed, now);
+                let mut result = vec![];
+                if let Some(event) = self.gestures.state(pressed, now)
+                    && self.interaction.accepts_taps()
+                {
+                    self.gesture_hooks.dispatch(event, output);
+                    result.push(InputEvent::Gesture(event));
+                }
+                return Ok(result);
+            }
             Some("connection_lost") => {
+                let mut result = self.interaction.disconnected();
                 self.gestures.reset();
                 self.gestures_live = false;
-                return Ok(self.continuation.connection_lost(output));
+                result.extend(
+                    self.interaction
+                        .apply(self.continuation.connection_lost(output)),
+                );
+                output.debug("Desktop interaction: connection_lost -> Error; recording indicators stopped; audio recovery retained");
+                return Ok(result);
             }
             Some("caught_up") => {
+                self.interaction.ready();
                 self.continuation.caught_up(output);
                 self.gestures_live = self.save_cursor;
                 return Ok(vec![]);
             }
             _ => {}
         }
+        let trigger = message["type"].as_str().unwrap_or("unknown").to_owned();
+        let before = self.interaction.state();
         let mut result = vec![];
+        if message["type"] == "state" {
+            if let Some(pressed) = message["collecting"].as_bool() {
+                result.extend(self.interaction.observe_state(
+                    pressed,
+                    Instant::now(),
+                    self.resume_grace,
+                ));
+            }
+        }
         for event in self.decode_raw(message, output)? {
             result.extend(self.continuation.apply(event, output)?);
+        }
+        let result = self.interaction.apply(result);
+        if !self.interaction.accepts_taps() {
+            self.gestures.hold_started();
+        }
+        if before != self.interaction.state() {
+            output.debug(format!(
+                "Desktop interaction: {:?} -> {:?}; trigger={trigger}",
+                before,
+                self.interaction.state()
+            ));
         }
         Ok(result)
     }
     fn poll(&mut self, output: &Output) -> Result<Vec<InputEvent>> {
         let mut result = self.continuation.poll(output);
-        if self.gestures_live {
+        let threshold_events = self.interaction.poll(Instant::now());
+        if !threshold_events.is_empty() {
+            output.debug(format!(
+                "Desktop interaction: hold threshold elapsed; state={:?}",
+                self.interaction.state()
+            ));
+            self.gestures.hold_started();
+        }
+        if self.gestures_live && self.interaction.accepts_taps() {
             if let Some(event) = self.gestures.poll(Instant::now()) {
                 self.gesture_hooks.dispatch(event, output);
                 result.push(InputEvent::Gesture(event));
             }
         }
-        Ok(result)
+        let mut threshold_events = threshold_events;
+        threshold_events.extend(self.interaction.apply(result));
+        Ok(threshold_events)
+    }
+    fn completed(&mut self, key: &str) {
+        self.interaction.complete(key);
     }
     fn commit(&mut self, checkpoint: &Value) -> Result<()> {
         if self.save_cursor {

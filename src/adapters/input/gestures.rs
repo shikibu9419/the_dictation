@@ -30,6 +30,8 @@ pub struct Detector {
     window: Duration,
     last_seen: Option<u16>,
     pending: Option<Pending>,
+    pressed: bool,
+    unclassified: bool,
 }
 impl Detector {
     pub fn new(window: Duration) -> Self {
@@ -37,17 +39,37 @@ impl Detector {
             window,
             last_seen: None,
             pending: None,
+            pressed: false,
+            unclassified: false,
         }
     }
     pub fn reset(&mut self) {
         self.last_seen = None;
         self.pending = None;
+        self.pressed = false;
+        self.unclassified = false;
+    }
+    pub fn hold_started(&mut self) {
+        self.pending = None;
+        self.unclassified = false;
+    }
+    pub fn state(&mut self, pressed: bool, now: Instant) -> Option<GestureEvent> {
+        let completed = if pressed && !self.pressed {
+            let completed = self.poll(now);
+            self.unclassified = true;
+            completed
+        } else {
+            None
+        };
+        self.pressed = pressed;
+        completed
     }
     pub fn poll(&mut self, now: Instant) -> Option<GestureEvent> {
-        if self
-            .pending
-            .as_ref()
-            .is_none_or(|p| now.duration_since(p.at) < self.window)
+        if self.unclassified
+            || self
+                .pending
+                .as_ref()
+                .is_none_or(|p| now.duration_since(p.at) < self.window)
         {
             return None;
         }
@@ -72,7 +94,11 @@ impl Detector {
             return None;
         }
         self.last_seen = Some(index);
-        let completed = self.poll(now);
+        let completed = match press {
+            Press::Short => self.poll(now),
+            Press::Hold => None,
+        };
+        self.unclassified = false;
         match press {
             Press::Hold => self.pending = None,
             Press::Short => match &mut self.pending {
@@ -126,6 +152,38 @@ impl GestureHook for LogHook {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn second_press_defers_single_until_hold_or_short_is_known() {
+        let now = Instant::now();
+        let mut d = Detector::new(Duration::from_millis(500));
+        d.state(true, now);
+        d.observe(1, Press::Short, now);
+        d.state(false, now);
+        d.state(true, now + Duration::from_millis(200));
+        assert!(d.poll(now + Duration::from_secs(1)).is_none());
+        assert!(
+            d.observe(2, Press::Hold, now + Duration::from_secs(1))
+                .is_none()
+        );
+        assert!(d.poll(now + Duration::from_secs(2)).is_none());
+    }
+    #[test]
+    fn delayed_second_short_is_double_without_a_premature_single() {
+        let now = Instant::now();
+        let mut d = Detector::new(Duration::from_millis(500));
+        d.observe(1, Press::Short, now);
+        d.state(true, now + Duration::from_millis(200));
+        d.state(false, now + Duration::from_millis(300));
+        assert!(d.poll(now + Duration::from_secs(1)).is_none());
+        assert!(
+            d.observe(2, Press::Short, now + Duration::from_secs(1))
+                .is_none()
+        );
+        assert_eq!(
+            d.poll(now + Duration::from_millis(1500)).unwrap().gesture,
+            Gesture::DoubleTap
+        );
+    }
     #[test]
     fn single_double_and_hold_are_exclusive() {
         let now = Instant::now();

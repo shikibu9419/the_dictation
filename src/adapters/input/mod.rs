@@ -1,6 +1,7 @@
 mod continuation;
 pub mod gestures;
 mod index;
+mod interaction;
 mod pcm;
 pub mod stream;
 
@@ -19,8 +20,10 @@ pub enum InputEvent {
     Gesture(gestures::GestureEvent),
     Audio(AudioChunk),
     State(bool),
+    Activity { key: String, collecting: bool },
     Discard(String),
     Flush,
+    Checkpoint(Value),
 }
 
 /// Source-specific decoding and persistence stay on this side of the PCM boundary.
@@ -29,6 +32,7 @@ pub trait InputAdapter: Send {
     fn poll(&mut self, _output: &Output) -> Result<Vec<InputEvent>> {
         Ok(vec![])
     }
+    fn completed(&mut self, _key: &str) {}
     fn commit(&mut self, _checkpoint: &Value) -> Result<()> {
         Ok(())
     }

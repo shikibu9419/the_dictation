@@ -303,6 +303,8 @@ Macの実際のBLE探索でリングを検出し、30秒探索がIPCの待機期
 
 `src/adapters/input/gestures.rs` に、音声認識や録音結合から独立した検出器とフックを置いています。
 
+- デスクトップ入力側の `interaction.rs` が `Idle / Recording / Dictating / Error` を管理します。押下直後は `Idle` のまま候補を保持し、350msの長押し判定と実音声の到着後に録音表示を開始します。通知を取り逃した場合は受信音声の長さでも判定し、判定待ちの先頭音声も認識へ渡します。短押しの空音声は認識や録音表示へ流しません。タップ操作は `Idle` のときだけ確定します。
+- 解放通知で直ちに録音表示から受信待ちへ移ります。最終チャンク到着は別イベントで、残りの音声を欠落させず全文認識へ渡します。BLE再接続や遅延チャンクは録音表示を再開しません。状態とトリガの詳細は [デスクトップ状態遷移](docs/desktop-interaction.md) を参照してください。
 - `Detector` は `Press::Short` / `Press::Hold` と受信時刻を受け取り、500msの連打待ちの後に `Gesture::SingleTap` / `Gesture::DoubleTap` を確定します。ダブルタップ時にシングルタップを重複発火しません。3連打以上は現在未割り当てで、ダブルタップに丸めません。
 - `GestureHook::on_gesture` を実装し、`IndexInput::new` 内の `gesture_hooks.register(...)` に登録すると機能を割り当てられます。現在登録されているのは `LogHook` のみです。
 - 検出結果は `InputEvent::Gesture` とJSONの `gesture` イベントでGUIへ渡します。設定の `GestureBindings` で動作を選び、OSへのペーストはデスクトップサービスが実行します。

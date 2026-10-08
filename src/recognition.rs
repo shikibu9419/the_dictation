@@ -57,6 +57,7 @@ enum Job {
     Audio(Part, Instant),
     Release(String),
     Flush(oneshot::Sender<()>),
+    Checkpoint(Value),
 }
 struct Speech {
     engine: Box<dyn SpeechEngine>,
@@ -276,6 +277,7 @@ impl Speech {
                             }
                             if self.mode=="batch" {
                                 if let Some(checkpoint) = checkpoint {input.lock().unwrap().commit(&checkpoint)?;}
+                                input.lock().unwrap().completed(&key);
                                 let mut life=self.lifecycle.lock().unwrap();life.finished.insert(key.clone());life.retire(&key);
                             }
                         }
@@ -283,6 +285,7 @@ impl Speech {
                             if self.key.as_ref()==Some(&key) {self.cancel().await?;}
                             let mut life=self.lifecycle.lock().unwrap();life.closed.insert(key.clone());life.retire(&key);
                         }
+                        Some(Job::Checkpoint(value))=>{input.lock().unwrap().commit(&value)?;}
                         Some(Job::Flush(done))=>{let _=done.send(());}
                         None=>{self.engine.close().await?;return Ok(());}
                     }
@@ -301,7 +304,12 @@ struct Recognition {
 }
 impl Recognition {
     fn release(&self, key: &str) -> Result<()> {
-        let newly_released = self.lifecycle.lock().unwrap().released.insert(key.to_owned());
+        let newly_released = self
+            .lifecycle
+            .lock()
+            .unwrap()
+            .released
+            .insert(key.to_owned());
         if newly_released {
             if let Some(live) = &self.live {
                 live.send(Job::Release(key.to_owned()))?;
@@ -335,8 +343,11 @@ impl Recognition {
     }
     fn add(&mut self, part: Part) -> Result<()> {
         let key = part.key.clone();
-        if self.live.is_none() && !part.final_part && !part.samples.is_empty()
-            && !self.lifecycle.lock().unwrap().suppressed(&key) {
+        if self.live.is_none()
+            && !part.final_part
+            && !part.samples.is_empty()
+            && !self.lifecycle.lock().unwrap().suppressed(&key)
+        {
             emit(json!({"type":"audio_level", "recording":key,
                 "level":crate::audio_level::normalized(&part.samples)}));
         }
@@ -404,9 +415,19 @@ impl Recognition {
             };
             for event in events {
                 match event {
-                    InputEvent::Gesture(event) => emit(json!({"type":"gesture", "gesture":event.gesture,
-                        "first_collection":event.first_collection, "last_collection":event.last_collection})),
+                    InputEvent::Gesture(event) => {
+                        emit(json!({"type":"gesture", "gesture":event.gesture,
+                        "first_collection":event.first_collection, "last_collection":event.last_collection}))
+                    }
+                    InputEvent::Checkpoint(value) => self.batch.send(Job::Checkpoint(value))?,
                     InputEvent::Audio(part) => self.add(part)?,
+                    InputEvent::Activity { key, collecting } => {
+                        self.lifecycle.lock().unwrap().collecting = Some(collecting);
+                        self.output.debug(format!(
+                            "Recording activity key={key} collecting={collecting}"
+                        ));
+                        emit(json!({"type":"activity", "recording":key, "collecting":collecting}));
+                    }
                     InputEvent::State(collecting) => self.state(collecting)?,
                     InputEvent::Discard(key) => self.discard(&key)?,
                     InputEvent::Flush => {
@@ -419,7 +440,9 @@ impl Recognition {
                         let (batch, batch_done) = oneshot::channel();
                         if let Some(sender) = &self.live {
                             sender.send(Job::Flush(live))?;
-                        } else { let _ = live.send(()); }
+                        } else {
+                            let _ = live.send(());
+                        }
                         self.batch.send(Job::Flush(batch))?;
                         live_done.await?;
                         batch_done.await?;
@@ -452,12 +475,28 @@ pub async fn worker(options: Options) -> Result<()> {
     };
     let plan = settings.recognition_plan();
     let live = if let Some(model) = plan.live {
-        Some(Speech::start("live", &config(model), &options, life.clone(), output.clone()).await?)
+        Some(
+            Speech::start(
+                "live",
+                &config(model),
+                &options,
+                life.clone(),
+                output.clone(),
+            )
+            .await?,
+        )
     } else {
         output.debug("Live recognition disabled; recording goes directly to batch recognition");
         None
     };
-    let batch = Speech::start("batch", &config(plan.batch), &options, life.clone(), output.clone()).await?;
+    let batch = Speech::start(
+        "batch",
+        &config(plan.batch),
+        &options,
+        life.clone(),
+        output.clone(),
+    )
+    .await?;
     let (ltx, lrx) = mpsc::unbounded_channel();
     let (btx, brx) = mpsc::unbounded_channel();
     let recognition = Recognition {
@@ -472,7 +511,9 @@ pub async fn worker(options: Options) -> Result<()> {
         &options.command,
     )?));
     let mut tasks = JoinSet::new();
-    if let Some(live) = live { tasks.spawn(live.work(lrx, input.clone())); }
+    if let Some(live) = live {
+        tasks.spawn(live.work(lrx, input.clone()));
+    }
     tasks.spawn(batch.work(brx, input.clone()));
     tasks.spawn(recognition.input(input));
     emit(json!({"type":"ready"}));

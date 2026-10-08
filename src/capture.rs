@@ -31,6 +31,7 @@ impl Received {
         Ok(())
     }
     fn state(&mut self, state: &RingState) -> Result<()> {
+        self.send(json!({"type":"button_state","pressed":state.in_collection_state}))?;
         if state.in_collection_state {
             self.inactive_since = None;
         } else if self.collecting == Some(true) {
@@ -211,7 +212,8 @@ async fn receive(
             json!({"address":address})
         } else {
             output.debug("Scanning for Index");
-            ble.request(json!({"type":"find","address":address}), args.timeout).await?
+            ble.request(json!({"type":"find","address":address}), args.timeout)
+                .await?
         };
         if device.is_null() {
             if fetch {
@@ -257,7 +259,9 @@ async fn receive(
             download(&mut ble, &mut received, &args, &output, fetch).await
         }
         .await;
-        if result.is_err() { received.send(json!({"type":"connection_lost"}))?; }
+        if result.is_err() {
+            received.send(json!({"type":"connection_lost"}))?;
+        }
         ble.unsubscribe().await;
         ble.disconnect().await;
         match result {
@@ -357,11 +361,15 @@ mod gui_tests {
         received.state(&state).unwrap();
         let diagnostics = std::fs::read_to_string(log).unwrap();
         assert_eq!(diagnostics.matches("Recording state edge").count(), 3);
-        assert!(!diagnostics.lines().any(|line| line.starts_with('{')),
-            "Raw BLE edges must not bypass logical input state events");
+        assert!(
+            !diagnostics.lines().any(|line| line.starts_with('{')),
+            "Raw BLE edges must not bypass logical input state events"
+        );
         let mut states = vec![];
         while let Ok(value) = rx.try_recv() {
-            states.push(value["collecting"].as_bool().unwrap());
+            if value["type"] == "state" {
+                states.push(value["collecting"].as_bool().unwrap());
+            }
         }
         assert_eq!(states, [false, false, true, true, false]);
     }

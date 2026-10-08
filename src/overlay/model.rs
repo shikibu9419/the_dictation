@@ -86,6 +86,17 @@ impl Model {
     pub fn accept(&mut self, e: Event, target: i32) {
         match e.r#type.as_str() {
             "ready" => self.ready = true,
+            "activity" => {
+                let (Some(key), Some(collecting)) = (e.recording, e.collecting) else { return };
+                let phase = if collecting { Phase::Recording } else { Phase::Receiving };
+                if let Some(item) = self.items.iter_mut().find(|i| i.recording.as_ref() == Some(&key)) {
+                    // Late transport events cannot revive a completed/dismissed item.
+                    if matches!(item.phase, Phase::Recording | Phase::Receiving) { item.phase = phase; }
+                } else {
+                    self.error = None;
+                    self.add(Some(key), phase, target);
+                }
+            }
             "state" => {
                 if let Some(value) = e.collecting
                     && value != self.collecting
@@ -283,6 +294,25 @@ mod tests {
             m,
             json!({"type":"text","recording":key,"text":text,"mode":mode,"final":final_result}),
         );
+    }
+    #[test]
+    fn keyed_activity_is_atomic_and_resume_keeps_the_same_item() {
+        let mut m = Model::default();
+        let activity = |collecting| json!({"type":"activity", "recording":"2351", "collecting":collecting});
+        send(&mut m, activity(true));
+        let id = m.visible().unwrap().id;
+        assert_eq!(m.visible().unwrap().recording.as_deref(), Some("2351"));
+        send(&mut m, activity(false));
+        assert_eq!(m.visible().unwrap().phase, Phase::Receiving);
+        send(&mut m, activity(true));
+        assert_eq!(m.items.len(), 1);
+        assert_eq!(m.visible().unwrap().id, id);
+        text(&mut m, "2351", "complete", "batch", true);
+        send(&mut m, activity(true));
+        assert_eq!(m.visible().unwrap().phase, Phase::Ready);
+        m.dismiss_id(id);
+        send(&mut m, activity(true));
+        assert!(m.visible().is_none());
     }
     #[test]
     fn history_action_can_open_an_empty_editor_without_saving_empty_history() {
