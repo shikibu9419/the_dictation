@@ -1,8 +1,8 @@
 use crate::{
     audio::{Resampler, SpeechStart, RATE},
-    inference::AsrInference,
+    inference::{AsrInference, TranscribeResult, WindowCache},
     protocol::{Input, Sink, VERSION},
-    streaming::{BatchSession, LiveSession},
+    streaming::{BatchSession, Decoder, LiveSession},
     tensor::Device,
 };
 use anyhow::{ensure, Context, Result};
@@ -61,6 +61,29 @@ struct Session {
     forwarded: u64,
     consumed_source: u64,
     last_text: String,
+}
+struct ObservedDecoder<'a> {
+    model: &'a AsrInference,
+    input: &'a Input,
+    epoch: u64,
+    mode: &'a str,
+}
+impl Decoder for ObservedDecoder<'_> {
+    fn decode(
+        &self,
+        audio: &[f32],
+        language: &str,
+        prefix: &[i64],
+        cache: &mut WindowCache,
+        cancelled: &dyn Fn() -> bool,
+    ) -> Result<TranscribeResult> {
+        self.input.publish(self.epoch, json!({"type":"status","text":format!("Qwen {} inference started", self.mode),"input_window_samples":audio.len(),"window_rate":RATE}))?;
+        self.model
+            .transcribe_cached(audio, Some(language), prefix, cache, cancelled)
+    }
+    fn rollback(&self, tokens: &[i64], count: usize) -> Result<Vec<i64>> {
+        self.model.rollback_prefix(tokens, count)
+    }
 }
 impl Session {
     fn new(epoch: u64, rate: u32, language: &str) -> Result<Self> {
@@ -126,7 +149,8 @@ fn serve(path: &Path, language: &str, mode: &str, input: &Arc<Input>) -> Result<
     if input.closed() {
         return input.shutdown_result();
     }
-    input.sink.send(&json!({"type":"ready","protocol_version":VERSION,"capabilities":["session_generation","consumed_samples","permit"]}))?;
+    input.idle()?;
+    input.sink.send(&json!({"type":"ready","protocol_version":VERSION,"capabilities":["session_generation","consumed_samples","permit","permit_ack"]}))?;
     let mut session: Option<Session> = None;
     while let Some(work) = input.take()? {
         if work.reset_only {
@@ -136,28 +160,36 @@ fn serve(path: &Path, language: &str, mode: &str, input: &Arc<Input>) -> Result<
         if session.as_ref().is_none_or(|s| s.epoch != work.epoch) {
             session = Some(Session::new(work.epoch, work.rate, language)?);
         }
-        if input.checkpoint(work.epoch) {
+        if input.checkpoint(work.epoch, crate::backend::mlx::stream::synchronize) {
             continue;
         }
         let state = session.as_mut().context("Missing recognition session")?;
         let audio = state.resampler.feed(&work.audio, work.final_input)?;
         state.resampled += audio.len() as u64;
         let started = Instant::now();
+        let paused_before = input.paused_seconds();
+        let decoder = ObservedDecoder {
+            model: &model,
+            input,
+            epoch: work.epoch,
+            mode,
+        };
         let updates = if mode == "live" {
             let audio = state.onset.feed(&audio);
             state.forwarded += audio.len() as u64;
-            state.live.feed(&model, &audio, work.final_input, &|| {
-                input.checkpoint(work.epoch)
+            state.live.feed(&decoder, &audio, work.final_input, &|| {
+                input.checkpoint(work.epoch, crate::backend::mlx::stream::synchronize)
             })
         } else {
-            state.batch.feed(&model, &audio, work.final_input, &|| {
-                input.checkpoint(work.epoch)
+            state.batch.feed(&decoder, &audio, work.final_input, &|| {
+                input.checkpoint(work.epoch, crate::backend::mlx::stream::synchronize)
             })
         };
         if !input.current(work.epoch) {
             continue;
         }
         let updates = updates?;
+        let paused_seconds = input.paused_seconds() - paused_before;
         for update in updates {
             let offset = if mode == "live" {
                 state.resampled - state.forwarded
@@ -169,7 +201,7 @@ fn serve(path: &Path, language: &str, mode: &str, input: &Arc<Input>) -> Result<
                 .max(state.consumed_source);
             state.consumed_source = consumed;
             let mut status = json!({"type":"status","text":format!("Qwen {mode} consumed PCM"),"consumed_samples":consumed,
-                "window_samples":update.buffered_samples,"window_rate":RATE,"decode_seconds":started.elapsed().as_secs_f64()});
+                "window_samples":update.buffered_samples,"window_rate":RATE,"decode_seconds":(started.elapsed().as_secs_f64()-paused_seconds).max(0.0),"paused_seconds":paused_seconds});
             if let Some((start, end)) = update.segment {
                 status["segment_start"] = json!(start as f64 / RATE as f64);
                 status["segment_end"] = json!(end as f64 / RATE as f64);

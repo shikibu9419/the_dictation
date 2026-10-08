@@ -3,8 +3,8 @@
 Rust library for Qwen3-ASR 1.7B on Apple Silicon, using the MLX C API and Metal.
 This crate implements the inference core and a resident JSONL worker, `QwenNative`.
 The application invokes this worker directly. `setup-qwen` verifies the pinned model;
-`build-app.sh` bundles the executable and `mlx.metallib`. Parent scheduling is a
-separate implementation step.
+`build-app.sh` bundles the executable and `mlx.metallib`. The parent grants compute
+access to live first, suspending and resuming batch without discarding its state.
 
 The fixed checkpoint is `moona3k/mlx-qwen3-asr-1.7b-8bit`, revision
 `22c8abe6a6772122dda5905967d7496d1d3e8dd2`. Packed 8-bit/group-64 encoder,
@@ -71,7 +71,12 @@ Stdin and stdout use JSONL. Stdout contains protocol messages only.
 - `cancel`: invalidates queued and computing results immediately; drops recording state
   on the inference thread at the next computation boundary.
 - `permit`: `enabled: false` suspends inference at an encoder/token boundary;
-  `true` resumes the same work. PCM reception and acknowledgement remain active.
+  `true` resumes the same work. Supply a monotonically increasing `request` ID.
+  The worker echoes `permit_request`, `permitted`, and `paused` in a worker-wide
+  status with no recording ID. `paused: false` is only receipt of the request;
+  wait for `paused: true` before granting another worker the compute slot.
+  That response follows Metal synchronization or comes immediately when idle.
+  PCM reception and acknowledgement remain active.
 - EOF terminates the worker, including while paused. The model is loaded once.
 
 Replies carry `protocol_version: 2`. `accepted_samples` counts received source PCM;
@@ -86,3 +91,9 @@ window shifts reset caches. Batch recognition covers disjoint audio intervals fr
 start to finish. Segment boundaries use sustained quiet near the end of the window;
 no Japanese substring deduplication is applied. Entire-recording final recognition
 is a separate batch request, rather than the live worker's `finish` result.
+
+The parent adapter limits unconsumed PCM to two model windows and excludes
+intentional pause time from the batch response budget. `decode_seconds` excludes
+cooperative waits; `paused_seconds` reports waits during the same worker turn.
+An old native binary without the `permit_ack` capability is rejected; rebuild the
+worker along with the application when updating the IPC implementation.

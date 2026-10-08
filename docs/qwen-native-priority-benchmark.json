@@ -1,0 +1,52 @@
+{
+  "model_revision": "22c8abe6a6772122dda5905967d7496d1d3e8dd2",
+  "packet_samples": 3200,
+  "sample_rate": 16000,
+  "fixture": "Kyoko short.wav live, long.wav batch",
+  "metrics": {
+    "live_without_batch": {
+      "first_partial_seconds": 2.20231275,
+      "max_pcm_lag_seconds": 1.0,
+      "finish_seconds": 0.796528084,
+      "peak_memory_bytes": 2268914354,
+      "text": "こんにちは。これは音声認識の動作確認です。"
+    },
+    "live_while_batch_paused": [
+      {
+        "first_partial_seconds": 1.201665291,
+        "max_pcm_lag_seconds": 0.4,
+        "finish_seconds": 0.699658083,
+        "peak_memory_bytes": 2268914354,
+        "text": "こんにちは。これは音声認識の動作確認です。",
+        "recording": 1,
+        "pause_ack_seconds": 0.493186375
+      },
+      {
+        "first_partial_seconds": 1.402943459,
+        "max_pcm_lag_seconds": 0.2,
+        "finish_seconds": 0.665523458,
+        "peak_memory_bytes": 2268914354,
+        "text": "こんにちは。これは音声認識の動作確認です。",
+        "recording": 2,
+        "pause_ack_seconds": 0.120354792
+      }
+    ],
+    "batch_text": "最初の確認です。今日は指輪から届いた音声を日本語の文章に変換する仕組みについて説明します。ボタンを押すと音声の収集が始まり、話している間は文字が少しずつ表示されます。ボタンを離した後も届くのが遅れた音声を最後まで受け取ります。短い休憩を挟んだ場合でも文章の途中が消えてしまわないようにします。次の録音を始めたときには前の会話の内容を引き継がず新しい文章として処理します。これで最後の確認を終わります。",
+    "batch_segments": [
+      [
+        0.0,
+        27.525
+      ],
+      [
+        27.525,
+        37.8561875
+      ]
+    ]
+  },
+  "limitations": [
+    "One synthetic Japanese voice and short repeated live recordings",
+    "First partial measured after slot acquisition; add pause_ack_seconds for handoff time",
+    "Order, kernel warmup and other work on the Mac affect timing",
+    "No BLE, microphone, application restart or UI display"
+  ]
+}

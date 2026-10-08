@@ -1,5 +1,6 @@
 mod native_session;
 mod process;
+pub mod run_control;
 pub mod whisper;
 
 use crate::output::Output;
@@ -61,9 +62,13 @@ pub struct EngineMetadata {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub window_samples: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub input_window_samples: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub window_rate: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub decode_seconds: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub paused_seconds: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub peak_memory_bytes: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -72,6 +77,8 @@ pub struct EngineMetadata {
     pub permitted: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub paused: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub permit_request: Option<u64>,
 }
 impl EngineReply {
     pub fn kind(&self) -> &'static str {
@@ -96,6 +103,12 @@ pub trait SpeechEngine: Send {
     fn send(&mut self, command: EngineCommand) -> Reply<'_, ()>;
     fn event(&mut self) -> Reply<'_, EngineReply>;
     fn close(&mut self) -> Reply<'_, ()>;
+    fn input_backlogged(&self) -> bool {
+        false
+    }
+    fn control(&self) -> Option<std::sync::Arc<dyn run_control::ExecutionControl>> {
+        None
+    }
 }
 
 /// Resolved at the application boundary; adapters never read user settings.

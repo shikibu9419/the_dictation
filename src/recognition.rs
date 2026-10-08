@@ -1,7 +1,10 @@
 use crate::{
     adapters::{
         input::{self, AudioChunk as Part, InputAdapter, InputEvent},
-        speech::{self, EngineCommand, EngineReply, SpeechEngine},
+        speech::{
+            self, EngineCommand, EngineReply, SpeechEngine,
+            run_control::{LivePriority, active_timeout},
+        },
     },
     helper::{Helper, ProcessGroup},
     output::Output,
@@ -70,6 +73,7 @@ struct Speech {
     first_result: bool,
     lifecycle: Arc<Mutex<Lifecycle>>,
     output: Output,
+    priority: Option<LivePriority>,
 }
 impl Speech {
     async fn start(
@@ -91,6 +95,7 @@ impl Speech {
             first_result: false,
             lifecycle,
             output,
+            priority: None,
         };
         loop {
             let event = speech.engine.event().await?;
@@ -188,7 +193,11 @@ impl Speech {
         } else {
             Duration::from_secs(30)
         };
-        tokio::time::timeout(timeout, async {
+        let activity = (kind == "finish")
+            .then(|| self.engine.control())
+            .flatten()
+            .map(|control| control.activity());
+        active_timeout(timeout, activity, async {
             self.engine.send(message).await?;
             loop {
                 let event = self.engine.event().await?;
@@ -205,7 +214,7 @@ impl Speech {
                 "Speech engine {} stalled on {kind} (recording={:?})",
                 self.mode, self.key
             )
-        })??;
+        })?;
         self.output.debug(format!(
             "[{}] engine {kind} acknowledgement: {:.3}s",
             self.mode,
@@ -213,16 +222,21 @@ impl Speech {
         ));
         Ok(())
     }
-    async fn feed(&mut self, part: Part) -> Result<()> {
+    async fn feed(&mut self, part: Part, queued: Instant) -> Result<()> {
         if self.key.as_ref().is_some_and(|key| *key != part.key) {
             self.cancel().await?;
+        }
+        if self.key.is_none()
+            && let Some(priority) = &mut self.priority
+        {
+            priority.acquire().await?;
         }
         self.key = Some(part.key.clone());
         if self.rate.is_none() {
             self.rate = Some(part.rate);
             self.samples = 0;
             self.segments.clear();
-            self.first_input = None;
+            self.first_input = (!part.samples.is_empty()).then_some(queued);
             self.first_result = false;
         }
         ensure!(
@@ -232,6 +246,12 @@ impl Speech {
         let pcm = part.samples;
         self.samples += pcm.len();
         for block in pcm.chunks((part.rate / 2).max(1) as usize) {
+            while self.engine.input_backlogged() {
+                let activity = self.engine.control().map(|c| c.activity());
+                let event =
+                    active_timeout(Duration::from_secs(120), activity, self.engine.event()).await?;
+                self.event(event)?;
+            }
             if self.first_input.is_none() {
                 self.first_input = Some(Instant::now());
             }
@@ -248,6 +268,9 @@ impl Speech {
             self.command(EngineCommand::Finish, "final").await?;
             self.key = None;
             self.rate = None;
+            if let Some(priority) = &mut self.priority {
+                priority.release().await?;
+            }
         }
         Ok(())
     }
@@ -257,6 +280,9 @@ impl Speech {
         }
         self.key = None;
         self.rate = None;
+        if let Some(priority) = &mut self.priority {
+            priority.release().await?;
+        }
         Ok(())
     }
     async fn work(
@@ -277,7 +303,7 @@ impl Speech {
                                 self.output.debug(format!("recording={key}: below 150ms; returning empty text without speech inference"));
                                 emit(json!({"type":"text","recording":key,"mode":"batch","final":true,"text":""}));
                             } else {
-                                self.feed(part).await?;
+                                self.feed(part,queued).await?;
                             }
                             if self.mode=="batch" {
                                 if let Some(checkpoint) = checkpoint {input.lock().unwrap().commit(&checkpoint)?;}
@@ -492,7 +518,7 @@ pub async fn worker(options: Options) -> Result<()> {
         },
     };
     let plan = settings.recognition_plan();
-    let live = if let Some(model) = plan.live {
+    let mut live = if let Some(model) = plan.live {
         Some(
             Speech::start(
                 "live",
@@ -515,6 +541,11 @@ pub async fn worker(options: Options) -> Result<()> {
         output.clone(),
     )
     .await?;
+    if let Some(live) = &mut live
+        && let Some(batch_control) = batch.engine.control()
+    {
+        live.priority = Some(LivePriority::new(live.engine.control(), batch_control).await?);
+    }
     let (ltx, lrx) = mpsc::unbounded_channel();
     let (btx, brx) = mpsc::unbounded_channel();
     let recognition = Recognition {

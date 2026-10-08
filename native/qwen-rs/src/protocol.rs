@@ -7,6 +7,7 @@ use std::{
     collections::VecDeque,
     io::{BufRead, Read, Write},
     sync::{Arc, Condvar, Mutex},
+    time::{Duration, Instant},
 };
 
 pub const VERSION: u32 = 2;
@@ -31,7 +32,7 @@ enum Command {
     Audio { pcm: String, sample_rate: u32 },
     Finish,
     Cancel,
-    Permit { enabled: bool },
+    Permit { enabled: bool, request: Option<u64> },
 }
 
 pub struct Sink(Mutex<Box<dyn Write + Send>>);
@@ -58,6 +59,10 @@ struct State {
     delivered: u64,
     finish: bool,
     permitted: bool,
+    permit_request: u64,
+    busy: bool,
+    paused: bool,
+    paused_time: Duration,
     closed: bool,
     failure: Option<String>,
 }
@@ -74,6 +79,10 @@ impl Default for State {
             delivered: 0,
             finish: false,
             permitted: true,
+            permit_request: 0,
+            busy: true, // Loading/warmup belongs to the inference owner too.
+            paused: false,
+            paused_time: Duration::ZERO,
             closed: false,
             failure: None,
         }
@@ -97,6 +106,13 @@ impl State {
         value["accepted_samples"] = json!(self.accepted);
         value["sample_rate"] = json!(self.rate.unwrap_or(16000));
         value
+    }
+    fn permit_ack(&self) -> Value {
+        // Worker-wide control is independent of recording identity. A cancel
+        // must not make a pause acknowledgement appear to belong to stale PCM.
+        json!({"type":"status","protocol_version":VERSION,
+            "text":"Qwen execution permission", "permit_request":self.permit_request,
+            "permitted":self.permitted, "paused":!self.permitted && (!self.busy || self.paused)})
     }
 }
 pub struct Input {
@@ -183,9 +199,12 @@ impl Input {
                 self.sink.send(&cancelled)?;
                 s.tag.generation += 1;
             }
-            Command::Permit { enabled } => {
+            Command::Permit { enabled, request } => {
+                let request = request.unwrap_or(s.permit_request + 1);
+                ensure!(request > s.permit_request, "Out-of-order permit request");
+                s.permit_request = request;
                 s.permitted = enabled;
-                self.sink.send(&s.envelope(json!({"type":"status","text":"Qwen run permission updated","permitted":enabled})))?;
+                self.sink.send(&s.permit_ack())?;
             }
         }
         self.changed.notify_all();
@@ -233,19 +252,48 @@ impl Input {
         !s.closed && s.epoch == epoch
     }
     /// Cooperative scheduling: a paused batch retains its in-progress model state.
-    pub fn checkpoint(&self, epoch: u64) -> bool {
+    pub fn checkpoint(&self, epoch: u64, synchronize: impl FnOnce()) -> bool {
         let mut s = self.state.lock().unwrap();
-        let mut reported = false;
+        let mut pause_began = None;
+        if !s.closed && s.epoch == epoch && !s.permitted {
+            // This callback runs on the model thread. Synchronize outstanding
+            // Metal work before claiming that another worker may use the GPU.
+            drop(s);
+            synchronize();
+            s = self.state.lock().unwrap();
+        }
         while !s.closed && s.epoch == epoch && !s.permitted {
-            if !reported {
-                if self.sink.send(&s.envelope(json!({"type":"status","text":"Qwen paused at inference boundary","paused":true}))).is_err(){s.closed=true;break;}
-                reported = true;
+            if !s.paused {
+                s.paused = true;
+                pause_began = Some(Instant::now());
+                if self.sink.send(&s.permit_ack()).is_err() {
+                    s.closed = true;
+                    break;
+                }
             }
             s = self.changed.wait(s).unwrap();
         }
+        if let Some(began) = pause_began {
+            s.paused_time += began.elapsed();
+        }
+        s.paused = false;
         s.closed || s.epoch != epoch
     }
+    pub fn paused_seconds(&self) -> f64 {
+        self.state.lock().unwrap().paused_time.as_secs_f64()
+    }
+    pub fn idle(&self) -> Result<()> {
+        let mut s = self.state.lock().unwrap();
+        let was_busy = s.busy;
+        s.busy = false;
+        s.paused = false;
+        if was_busy && !s.permitted {
+            self.sink.send(&s.permit_ack())?;
+        }
+        Ok(())
+    }
     pub fn take(&self) -> Result<Option<Work>> {
+        self.idle()?;
         let mut s = self.state.lock().unwrap();
         while !s.closed && s.pending.is_empty() && !s.finish && !s.reset_pending {
             s = self.changed.wait(s).unwrap();
@@ -268,6 +316,7 @@ impl Input {
             }));
         }
         let rate = s.rate.unwrap_or(16000);
+        s.busy = true;
         // Coalesce pending packets, bounding each catch-up turn to two seconds.
         let count = s.pending.len().min(rate as usize * 2);
         let audio = s
@@ -354,7 +403,7 @@ mod tests {
         command(&i, json!({"type":"permit","enabled":false})).unwrap();
         let epoch = i.state.lock().unwrap().epoch;
         let child = i.clone();
-        let task = std::thread::spawn(move || child.checkpoint(epoch));
+        let task = std::thread::spawn(move || child.checkpoint(epoch, || {}));
         command(&i, json!({"type":"cancel"})).unwrap();
         assert!(task.join().unwrap());
         i.clone().read(std::io::Cursor::new(b""));
@@ -373,5 +422,43 @@ mod tests {
         assert!(i.finish(w.epoch, "text", 1).is_err());
         i.finish(w.epoch, "text", 2).unwrap();
         assert!(!i.current(w.epoch));
+    }
+    #[test]
+    fn pause_ack_waits_for_gpu_boundary_and_idle_ack_is_immediate() {
+        use std::{
+            sync::mpsc,
+            time::{Duration, Instant},
+        };
+        let i = input();
+        command(&i, json!({"type":"permit","enabled":false,"request":7})).unwrap();
+        assert_eq!(i.state.lock().unwrap().permit_ack()["paused"], false);
+        let (entered, entry) = mpsc::channel();
+        let (resume, gate) = mpsc::channel();
+        let child = i.clone();
+        let task = std::thread::spawn(move || {
+            child.checkpoint(0, || {
+                entered.send(()).unwrap();
+                gate.recv().unwrap();
+            })
+        });
+        entry.recv_timeout(Duration::from_secs(1)).unwrap();
+        assert_eq!(i.state.lock().unwrap().permit_ack()["paused"], false);
+        resume.send(()).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while !i.state.lock().unwrap().paused {
+            assert!(Instant::now() < deadline);
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        command(&i, json!({"type":"permit","enabled":false,"request":8})).unwrap();
+        let ack = i.state.lock().unwrap().permit_ack();
+        assert_eq!(ack["permit_request"], 8);
+        assert_eq!(ack["paused"], true);
+        assert!(ack.get("session_id").is_none());
+        command(&i, json!({"type":"cancel"})).unwrap();
+        assert!(task.join().unwrap());
+        i.idle().unwrap();
+        command(&i, json!({"type":"permit","enabled":false,"request":9})).unwrap();
+        assert_eq!(i.state.lock().unwrap().permit_ack()["paused"], true);
+        assert!(command(&i, json!({"type":"permit","enabled":true,"request":8})).is_err());
     }
 }

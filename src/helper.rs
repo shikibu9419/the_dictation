@@ -2,11 +2,11 @@ use crate::output::Output;
 use anyhow::{Context, Result, bail};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
-use std::{path::PathBuf, process::Stdio, time::Duration};
+use std::{path::PathBuf, process::Stdio, sync::Arc, time::Duration};
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
     process::{Child, ChildStdin, Command},
-    sync::mpsc,
+    sync::{Mutex, mpsc},
 };
 
 pub async fn executable(name: &str, source: &str, output: &Output) -> Result<PathBuf> {
@@ -70,12 +70,34 @@ pub async fn executable(name: &str, source: &str, output: &Output) -> Result<Pat
 
 pub struct Helper {
     pub child: Child,
-    stdin: Option<ChildStdin>,
+    stdin: HelperInput,
     pub events: mpsc::UnboundedReceiver<Result<Value>>,
     readers: Vec<tokio::task::JoinHandle<()>>,
 }
+#[derive(Clone)]
+pub struct HelperInput(Arc<Mutex<Option<ChildStdin>>>);
+impl HelperInput {
+    pub async fn send(&self, message: &Value) -> Result<()> {
+        let mut bytes = serde_json::to_vec(message)?;
+        bytes.push(b'\n');
+        let mut handle = self.0.lock().await;
+        let stdin = handle.as_mut().context("Helper input closed")?;
+        stdin.write_all(&bytes).await?;
+        stdin.flush().await?;
+        Ok(())
+    }
+}
+pub type Observer = Box<dyn Fn(&Result<Value>) + Send>;
 impl Helper {
-    pub async fn spawn(mut command: Command, output: Output, label: String) -> Result<Self> {
+    pub async fn spawn(command: Command, output: Output, label: String) -> Result<Self> {
+        Self::spawn_observed(command, output, label, None).await
+    }
+    pub async fn spawn_observed(
+        mut command: Command,
+        output: Output,
+        label: String,
+        observer: Option<Observer>,
+    ) -> Result<Self> {
         let mut child = command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -90,23 +112,19 @@ impl Helper {
         let readers = vec![
             tokio::spawn(async move {
                 loop {
-                    match stdout.next_line().await {
+                    let event = match stdout.next_line().await {
                         Ok(Some(line)) => {
-                            if tx
-                                .send(serde_json::from_str(&line).context("Invalid helper JSON"))
-                                .is_err()
-                            {
-                                break;
-                            }
+                            serde_json::from_str(&line).context("Invalid helper JSON")
                         }
-                        Ok(None) => {
-                            let _ = tx.send(Err(anyhow::anyhow!("Helper output closed")));
-                            break;
-                        }
-                        Err(e) => {
-                            let _ = tx.send(Err(e.into()));
-                            break;
-                        }
+                        Ok(None) => Err(anyhow::anyhow!("Helper output closed")),
+                        Err(e) => Err(e.into()),
+                    };
+                    let failed = event.is_err();
+                    if let Some(observer) = &observer {
+                        observer(&event);
+                    }
+                    if tx.send(event).is_err() || failed {
+                        break;
                     }
                 }
             }),
@@ -136,25 +154,23 @@ impl Helper {
         ];
         Ok(Self {
             child,
-            stdin: Some(stdin),
+            stdin: HelperInput(Arc::new(Mutex::new(Some(stdin)))),
             events,
             readers,
         })
     }
     pub async fn send(&mut self, message: &Value) -> Result<()> {
-        let mut bytes = serde_json::to_vec(message)?;
-        bytes.push(b'\n');
-        let stdin = self.stdin.as_mut().context("Helper input closed")?;
-        stdin.write_all(&bytes).await?;
-        stdin.flush().await?;
-        Ok(())
+        self.stdin.send(message).await
+    }
+    pub fn input(&self) -> HelperInput {
+        self.stdin.clone()
     }
     pub async fn event(&mut self) -> Result<Value> {
         self.events.recv().await.context("Helper closed")?
     }
     pub async fn close(&mut self) {
         // Closing the handle delivers EOF; shutdown() alone leaves the pipe open on macOS.
-        drop(self.stdin.take());
+        drop(self.stdin.0.lock().await.take());
         if tokio::time::timeout(Duration::from_secs(3), self.child.wait())
             .await
             .is_err()

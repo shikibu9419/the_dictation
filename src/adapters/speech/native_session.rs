@@ -29,6 +29,11 @@ impl Default for NativeSession {
     }
 }
 impl NativeSession {
+    pub fn backlogged(&self, rate: u32) -> bool {
+        // At most two model windows may be in flight. The parent's PCM store
+        // owns the rest; accepted bytes alone must not drain that store.
+        self.sent.saturating_sub(self.consumed) >= rate as u64 * 60
+    }
     fn advance(&mut self) {
         self.tag.0 += 1;
         self.tag.1 += 1;
@@ -118,5 +123,16 @@ mod tests {
         assert!(session.accept(&reply("partial", 1, 50)).is_err());
         assert!(session.accept(&reply("final", 1, 70)).is_err());
         assert!(session.accept(&reply("final", 1, 100)).unwrap());
+    }
+    #[test]
+    fn backpressure_counts_consumption_not_acknowledgement() {
+        let mut session = NativeSession::default();
+        session.command(json!({"type":"audio"}), 60 * 9997);
+        assert!(session.backlogged(9997));
+        let ack = json!({"type":"accepted","protocol_version":2,"session_id":1,"generation":1,"accepted_samples":60*9997});
+        assert!(session.accept(&ack).unwrap());
+        assert!(session.backlogged(9997));
+        session.accept(&reply("status", 1, 27 * 9997)).unwrap();
+        assert!(!session.backlogged(9997));
     }
 }
