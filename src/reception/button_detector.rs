@@ -22,6 +22,7 @@ pub enum Evidence {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct HistoryDelta {
     pub collection: u64,
+    pub snapshot: Option<Vec<Press>>,
     pub added: Vec<Press>,
     pub evidence: Evidence,
 }
@@ -38,6 +39,7 @@ impl ButtonHistory {
         );
         let mut delta = HistoryDelta {
             collection,
+            snapshot: snapshot.map(<[Press]>::to_vec),
             added: vec![],
             evidence: Evidence::Missing,
         };
@@ -81,6 +83,18 @@ impl SourceClassification {
         final_part: bool,
     ) -> Option<Press> {
         if self.0 == Some(Press::Long) {
+            return self.0;
+        }
+        // A fresh, complete one-collection source owns its singleton metadata.
+        // Record83 is not a device-wide monotonic counter: separate short
+        // sources can each carry [Short], including immediately after [Long].
+        // Source/replay identity is checked by the receive store before here.
+        if first_collection
+            && final_part
+            && delta.evidence != Evidence::OutOfOrder
+            && let Some([press]) = delta.snapshot.as_deref()
+        {
+            self.0 = Some(*press);
             return self.0;
         }
         let trustworthy = delta.evidence == Evidence::Extended
@@ -187,12 +201,32 @@ mod tests {
         );
     }
     #[test]
-    fn historical_short_is_not_the_classification_of_a_new_completed_source() {
+    fn separate_completed_singletons_survive_history_reset_and_repetition() {
         let mut history = ButtonHistory::default();
-        history.observe(1, Some(&[Short])).unwrap();
-        let repeated = history.observe(2, Some(&[Short])).unwrap();
+        history.observe(2804, Some(&[Long])).unwrap();
+        for index in 2805..=2807 {
+            let delta = history.observe(index, Some(&[Short])).unwrap();
+            assert_eq!(
+                SourceClassification::default().observe(&delta, true, true),
+                Some(Short)
+            );
+            assert_eq!(
+                SourceClassification::default().observe(&delta, true, false),
+                None
+            );
+            assert_eq!(
+                SourceClassification::default().observe(&delta, false, true),
+                None
+            );
+        }
+        let next = history.observe(2808, Some(&[Short, Short])).unwrap();
         assert_eq!(
-            SourceClassification::default().observe(&repeated, true, true),
+            SourceClassification::default().observe(&next, true, true),
+            Some(Short)
+        );
+        let replay = history.observe(2808, Some(&[Short])).unwrap();
+        assert_eq!(
+            SourceClassification::default().observe(&replay, true, true),
             None
         );
     }

@@ -685,6 +685,48 @@ async fn ring_audio_uses_live_then_complete_batch_and_supports_a_second_recordin
 }
 
 #[tokio::test]
+async fn repeated_short_singletons_after_long_each_emit_one_tap_without_asr() {
+    // Replay the metadata from C2804..2808 on 2026-10-09. Different completed
+    // sources own [Long], [Short], [Short], [Short], [Short, Short].
+    let dir = tempfile::tempdir().unwrap();
+    let mut w = Worker::new(dir.path(), false).await;
+    w.send(0, collection(1, 1, true, 250, 1, 1)).await;
+    w.send(50, json!({"type":"clock"})).await;
+    w.until(|v| v["type"] == "text" && v["mode"] == "batch")
+        .await;
+    let start = w.events.len();
+    for index in 2..=5 {
+        let time = index as u64 * 1000;
+        let raw = collection(
+            index,
+            index as u32,
+            true,
+            4,
+            0,
+            if index == 5 { 2 } else { 1 },
+        );
+        w.send(time, raw.clone()).await;
+        w.send(time + 1, raw).await; // Transport replay is still deduplicated.
+        w.send(time + 300, json!({"type":"clock"})).await;
+        assert_eq!(
+            w.until(|v| v["type"] == "gesture").await["gesture"],
+            "single_tap"
+        );
+    }
+    w.send(6000, json!({"type":"flush"})).await;
+    w.until(|v| v["type"] == "flushed").await;
+    let events = &w.events[start..];
+    assert_eq!(events.iter().filter(|v| v["type"] == "gesture").count(), 4);
+    assert!(
+        events
+            .iter()
+            .all(|v| v["type"] != "text" && v["type"] != "reception_activity")
+    );
+    assert_eq!(batch_sizes(dir.path()), [250]);
+    w.close().await;
+}
+
+#[tokio::test]
 async fn taps_and_replays_never_create_recording_ui_or_speech_jobs() {
     let dir = tempfile::tempdir().unwrap();
     let mut w = Worker::new(dir.path(), true).await;
