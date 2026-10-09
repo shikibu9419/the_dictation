@@ -35,13 +35,13 @@ fn collection(samples: &[i16], first_index: u32, final_part: bool) -> Vec<u8> {
     raw
 }
 
-fn speech(dir: &Path) -> Vec<i16> {
-    let wav = dir.join("request.wav");
+fn speech(dir: &Path, name: &str, text: &str) -> Vec<i16> {
+    let wav = dir.join(name);
     let status = std::process::Command::new("say")
         .args(["-v", "Kyoko", "-o"])
         .arg(&wav)
         .arg(format!("--data-format=LEI16@{RATE}"))
-        .arg("牛乳を買うをTODOに追加して")
+        .arg(text)
         .status()
         .expect("run say");
     assert!(status.success(), "say failed");
@@ -53,16 +53,21 @@ fn speech(dir: &Path) -> Vec<i16> {
 /// Scripted Bluetooth helper. Every poll of the ring state advances a
 /// timeline: idle, then pressing with one new audio part per poll, then
 /// released with the final part available.
-fn bridge_script(parts: &[Vec<u8>]) -> String {
+fn bridge_script(parts: &[Vec<u8>], second: &[Vec<u8>], trigger: &Path) -> String {
     let parts: Vec<String> = parts.iter().map(|p| STANDARD.encode(p)).collect();
+    let second: Vec<String> = second.iter().map(|p| STANDARD.encode(p)).collect();
     format!(
         r#"#!/usr/bin/env python3
-import base64, json, struct, sys
+import base64, json, os, struct, sys
 CONTROL = {control:?}
 DATA = {data:?}
 PARTS = {parts}
+SECOND = {second}
+TRIGGER = {trigger:?}
 M = len(PARTS)
+M2 = len(SECOND)
 polls = 0
+press2 = None
 
 def emit(value):
     sys.stdout.write(json.dumps(value) + "\n"); sys.stdout.flush()
@@ -73,9 +78,13 @@ def notify(payload):
     emit({{"type": "notification", "uuid": DATA, "data": base64.b64encode(payload).decode()}})
 
 def available():
-    return 0 if polls < 3 else min(polls - 3, M)
+    first = 0 if polls < 3 else min(polls - 3, M)
+    second = 0 if press2 is None else min(polls - press2, M2)
+    return first + second
 
 def pressing():
+    if press2 is not None:
+        return polls < press2 + M2
     return 3 <= polls < 3 + M
 
 emit({{"type": "ready"}})
@@ -88,6 +97,8 @@ for line in sys.stdin:
     address = struct.unpack("<I", packet[1:5])[0]
     if address == 0x4003000E:
         polls += 1
+        if press2 is None and polls >= 3 + M and os.path.exists(TRIGGER):
+            press2 = polls
         count = 1 + available()
         flags = 32 if pressing() else 0
         notify(bytes([0, 0, 255, 255]) + struct.pack("<I", 1) + bytes([count, flags]))
@@ -95,23 +106,33 @@ for line in sys.stdin:
         notify(struct.pack("<HH", 1, 1 + available()))
     elif address & 0xFFFF0000 == 0x40020000:
         index = address & 0xFFFF
-        notify(base64.b64decode(PARTS[index - 1]) if 1 <= index <= M else b"")
+        parts = PARTS + SECOND
+        notify(base64.b64decode(parts[index - 1]) if 1 <= index <= len(parts) else b"")
 "#,
         control = CONTROL,
         data = DATA,
         parts = json!(parts),
+        second = json!(second),
+        trigger = trigger.display().to_string(),
     )
 }
 
-const PLAYBACK_SCRIPT: &str = r#"#!/bin/sh
-printf '{"type":"ready"}\n'
-played=0
-while IFS= read -r line; do
-  case "$line" in
-    *'"type":"audio"'*) played=$((played + 100)); printf '{"type":"played","item":"x","ms":%s}\n' "$played";;
-    *'"type":"clear"'*) played=0; printf '{"type":"cleared"}\n';;
-  esac
-done
+const PLAYBACK_SCRIPT: &str = r#"#!/usr/bin/env python3
+import base64, json, sys
+def emit(value):
+    sys.stdout.write(json.dumps(value) + "\n"); sys.stdout.flush()
+emit({"type": "ready"})
+played = {}
+for line in sys.stdin:
+    request = json.loads(line)
+    if request.get("type") == "audio":
+        item = request.get("item", "")
+        samples = len(base64.b64decode(request["pcm"])) // 2
+        played[item] = played.get(item, 0) + samples * 1000 // int(request.get("rate", 24000))
+        emit({"type": "played", "item": item, "ms": played[item]})
+    elif request.get("type") == "clear":
+        played = {}
+        emit({"type": "cleared"})
 "#;
 
 fn executable(path: &Path, content: &str) {
@@ -124,7 +145,7 @@ fn executable(path: &Path, content: &str) {
 async fn long_press_streams_speech_and_the_assistant_adds_the_todo() {
     let api_key = std::env::var("OPENAI_API_KEY").expect("OPENAI_API_KEY");
     let dir = tempfile::tempdir().unwrap();
-    let pcm = speech(dir.path());
+    let pcm = speech(dir.path(), "request.wav", "牛乳を買うをTODOに追加して");
     assert!(pcm.len() > RATE as usize, "speech shorter than a second");
     let chunks: Vec<&[i16]> = pcm.chunks(PART_SAMPLES).collect();
     let parts: Vec<Vec<u8>> = chunks
@@ -132,12 +153,25 @@ async fn long_press_streams_speech_and_the_assistant_adds_the_todo() {
         .enumerate()
         .map(|(i, chunk)| collection(chunk, 1, i + 1 == chunks.len()))
         .collect();
+    // A second press, made while the answer is playing, interrupts it.
+    let pcm2 = speech(dir.path(), "second.wav", "ありがとう、もう大丈夫");
+    let chunks2: Vec<&[i16]> = pcm2.chunks(PART_SAMPLES).collect();
+    let first2 = chunks.len() as u32 + 1;
+    let second: Vec<Vec<u8>> = chunks2
+        .iter()
+        .enumerate()
+        .map(|(i, chunk)| collection(chunk, first2, i + 1 == chunks2.len()))
+        .collect();
+    let trigger = dir.path().join("press-again");
 
     // Helpers next to the executable take precedence over compiled ones.
     let bin = dir.path().join("bin");
     std::fs::create_dir(&bin).unwrap();
     std::fs::copy(env!("CARGO_BIN_EXE_pebble-jev"), bin.join("pebble-jev")).unwrap();
-    executable(&bin.join("Bluetooth"), &bridge_script(&parts));
+    executable(
+        &bin.join("Bluetooth"),
+        &bridge_script(&parts, &second, &trigger),
+    );
     executable(&bin.join("AudioPlayback"), PLAYBACK_SCRIPT);
     let config = dir.path().join("config");
     std::fs::create_dir_all(config.join("pebble-index-rust")).unwrap();
@@ -159,29 +193,34 @@ async fn long_press_streams_speech_and_the_assistant_adds_the_todo() {
         .unwrap();
     let mut lines = BufReader::new(child.stdout.take().unwrap()).lines();
     let mut recording = false;
-    let mut user = String::new();
+    let mut users: Vec<String> = vec![];
     let mut tool: Option<Value> = None;
     let mut assistant = String::new();
-    let result = tokio::time::timeout(Duration::from_secs(120), async {
+    let result = tokio::time::timeout(Duration::from_secs(150), async {
         while let Some(line) = lines.next_line().await.unwrap() {
             let event: Value = serde_json::from_str(&line).unwrap();
             match event["type"].as_str().unwrap_or("") {
                 "recording" => recording = true,
+                "speaking" => {
+                    // The answer is being played: press the ring again.
+                    std::fs::write(&trigger, b"").unwrap();
+                }
                 "error" => panic!("session error: {}", event["data"]),
                 "conversation" => {
+                    users.clear();
                     for entry in event["data"].as_array().unwrap() {
                         match entry["kind"].as_str().unwrap() {
                             "user" if entry["done"] == true => {
-                                user = entry["text"].as_str().unwrap().to_owned();
+                                users.push(entry["text"].as_str().unwrap().to_owned());
                             }
                             "tool_call" if !entry["result"].is_null() => tool = Some(entry.clone()),
-                            "assistant" if entry["done"] == true => {
+                            "assistant" if entry["done"] == true && assistant.is_empty() => {
                                 assistant = entry["text"].as_str().unwrap().to_owned();
                             }
                             _ => {}
                         }
                     }
-                    if recording && !user.is_empty() && tool.is_some() && !assistant.is_empty() {
+                    if recording && users.len() >= 2 && tool.is_some() && !assistant.is_empty() {
                         return;
                     }
                 }
@@ -197,7 +236,7 @@ async fn long_press_streams_speech_and_the_assistant_adds_the_todo() {
         "deadline; log tail:\n{}",
         log.lines().rev().take(40).collect::<Vec<_>>().join("\n")
     );
-    eprintln!("user: {user}\ntool: {tool:?}\nassistant: {assistant}");
+    eprintln!("users: {users:?}\ntool: {tool:?}\nassistant: {assistant}");
     // The press streamed live chunks before the final recording was committed.
     let commit = log
         .lines()
@@ -213,6 +252,13 @@ async fn long_press_streams_speech_and_the_assistant_adds_the_todo() {
         sent_live > 0,
         "nothing was streamed while pressing: {commit}"
     );
+    // The second press interrupted the spoken answer at a valid position.
+    let realtime_errors: Vec<&str> = log
+        .lines()
+        .filter(|l| l.contains("Realtime error"))
+        .collect();
+    assert!(log.contains("Truncate item="), "no truncate in log");
+    assert!(realtime_errors.is_empty(), "{}", realtime_errors.join("\n"));
     let tool = tool.unwrap();
     assert_eq!(tool["name"], "add_todo");
     assert!(tool["arguments"].as_str().unwrap().contains("牛乳"));

@@ -333,6 +333,8 @@ impl Talk<'_> {
         if let Some((item, played_ms)) = position
             && played_ms > 0
         {
+            self.output
+                .debug(format!("Truncate item={item} audio_end_ms={played_ms}"));
             self.client.truncate(&item, played_ms)?;
         }
         Ok(())
