@@ -17,7 +17,21 @@ Index 01の音声をMacへBLE転送し、標準で **Apple SpeechAnalyzer / Spee
 
 初回はCargo依存関係とAppleの音声モデルの取得にインターネット接続が必要です。Apple APIを呼ぶSwiftヘルパーは初回実行時にビルドし、以降はキャッシュを使います。SwiftソースはRustバイナリへ埋め込まれるため、実行時にこのリポジトリのソースを探す必要はありません。
 
-On DeviceはApple Siliconを使用します。配布用appにはQwenNativeとMetalリソースを同梱し、設定画面の「モデルをダウンロード」でモデルを用意します。ソースからビルドする場合も、ルートのCargoでCLI・GUI・QwenNativeをまとめて生成します。認識中に音声をサーバーへ送信することはありません。
+On DeviceはApple Siliconを使用します。配布用appにはQwenNativeとMetalリソースを同梱し、設定画面の「モデルをダウンロード」でモデルを用意します。ソースからビルドする場合も、ルートのCargoワークスペースでCLI・GUI・QwenNativeをまとめて生成します。認識中に音声をサーバーへ送信することはありません。
+
+## リポジトリ構成
+
+Cargoワークスペースです。アプリは `apps/`、共有クレートは `crates/` にあります。
+
+| パス | 内容 |
+| --- | --- |
+| `apps/dictation` | 本READMEの音声入力アプリ（`pebble-index` CLI・`index-voice` GUI） |
+| `apps/pebble-jev` | リングのボタンでOpenAI Realtime APIと会話するアプリ（[README](apps/pebble-jev/README.md)） |
+| `crates/core` | ログ・JSONL IPC・Swiftヘルパー起動・設定ディレクトリ・PCMユーティリティ |
+| `crates/pebble-ring` | Index 01のBLE受信、転送データのデコード、ボタン状態機械、PCM入力境界 |
+| `crates/ui` | 見た目だけを担当するGPUIコンポーネントとmacOSフローティングパネルの橋渡し |
+| `crates/openai-realtime` | OpenAI Realtime APIのWebSocketクライアント |
+| `crates/qwen-asr` | Qwen3-ASRのMLX推論と`QwenNative`ワーカー（mlx-cのビルドはここだけ） |
 
 ## ビルド・起動
 
@@ -26,7 +40,7 @@ On DeviceはApple Siliconを使用します。配布用appにはQwenNativeとMet
 ```sh
 cd desktop/rust
 git submodule update --init -- vendor/mlx-c
-cargo build --release --locked --bins
+cargo build --release --locked -p dictation -p qwen-asr --bins
 ./target/release/pebble-index pair
 ./target/release/pebble-index --log debug.log
 ```
@@ -34,7 +48,7 @@ cargo build --release --locked --bins
 Cargoから直接起動する場合:
 
 ```sh
-cargo run --release -- --log debug.log
+cargo run --release -p dictation -- --log debug.log
 ```
 
 初回は`pair`を実行します。UUIDはRust版専用の`~/.config/pebble-index-rust/device.json`へ保存します。他のアプリの設定・キャッシュ・ロックは読みません。Rust版の二重起動時は既存PIDを表示してBLE接続前に終了します。
@@ -73,7 +87,7 @@ cd desktop/rust
 # GPUIの初回ビルドでMetal Toolchainがないと言われた場合
 xcodebuild -downloadComponent MetalToolchain
 git submodule update --init -- vendor/mlx-c
-cargo build --release --locked --bins
+cargo build --release --locked -p dictation -p qwen-asr --bins
 ./target/release/pebble-index pair
 ./target/release/pebble-index gui --log debug.log
 ```
@@ -81,7 +95,7 @@ cargo build --release --locked --bins
 アプリとして起動する場合:
 
 ```sh
-sh build-app.sh
+sh apps/dictation/build-app.sh
 open "target/Index Voice.app"
 ```
 
@@ -117,14 +131,14 @@ CLIでも同じ設定を使えます。設定ファイルは `~/.config/pebble-i
 ```sh
 # ソースからCLIを使う場合のみ。build-app.shでは自動実行します
 git submodule update --init -- vendor/mlx-c
-cargo build --release --locked --bins
-cargo run --release -- setup-qwen
-cargo run --release -- settings --input microphone --speech on-device
-cargo run --release -- gui
+cargo build --release --locked -p dictation -p qwen-asr --bins
+cargo run --release -p dictation -- setup-qwen
+cargo run --release -p dictation -- settings --input microphone --speech on-device
+cargo run --release -p dictation -- gui
 # PCマイクをCLIから使う
-cargo run --release -- microphone
+cargo run --release -p dictation -- microphone
 # 初期設定に戻す
-cargo run --release -- settings --input index --speech apple
+cargo run --release -p dictation -- settings --input index --speech apple
 ```
 
 On Deviceは1秒ごとに途中結果を更新し、最大30秒の音声窓と修正可能なテキスト末尾を使います。計算済みのエンコーダー出力・デコーダーKVを再利用し、窓の切り替えは可能なら無音位置で行います。1秒は更新用の音声量であり、BLE・計算・表示を含む総遅延ではありません。録音終了後は別プロセスで全音声をオフライン認識し直します。長い音声は最大30秒の区間へ分割して全区間を結合し、トークン上限による途中打ち切りは成功として表示しません。
@@ -237,12 +251,12 @@ GPUI ── JSON IPC ── Rustバックエンド
 
 | 境界 | 実装・役割 |
 | --- | --- |
-| 入力の変換 | `src/adapters/input/`。`IndexInput`はリングの転送データをデコード・結合し、`PcmInput`はファイルや外部入力のPCMを受け取ります。 |
+| 入力の変換 | `crates/pebble-ring/src/input/`。`IndexInput`はリングの転送データをデコード・結合し、`PcmInput`はファイルや外部入力のPCMを受け取ります。 |
 | 共通音声 | `AudioChunk`は録音ID、モノラルi16サンプル、レート、最終チャンクフラグ、入力元だけが解釈する保存位置を持ちます。 |
-| 認識の制御 | `src/recognition.rs`。ライブ認識・録音全体の再認識・結果通知を管理します。BLEや音声圧縮形式、エンジンの起動方法には依存しません。 |
-| 認識エンジン | `src/adapters/speech/`の`SpeechEngine`。PCM送信、終了、キャンセル、認識イベントを共通化しています。標準実装はApple SpeechAnalyzerです。 |
+| 認識の制御 | `apps/dictation/src/recognition.rs`。ライブ認識・録音全体の再認識・結果通知を管理します。BLEや音声圧縮形式、エンジンの起動方法には依存しません。 |
+| 認識エンジン | `apps/dictation/src/adapters/speech/`の`SpeechEngine`。PCM送信、終了、キャンセル、認識イベントを共通化しています。標準実装はApple SpeechAnalyzerです。 |
 | 保存位置 | `InputAdapter::commit`。録音全体の認識完了後、入力アダプターへ保存位置を返します。リングのカーソル保存は入力側が担当します。 |
-| 貼り付け | `src/desktop_service.rs`と`native/Paste.swift`。クリップボード、フォーカス復帰、Paste実行を担当します。 |
+| 貼り付け | `apps/dictation/src/desktop_service.rs`と`apps/dictation/native/Paste.swift`。クリップボード、フォーカス復帰、Paste実行を担当します。 |
 
 表示設定は `settings::Presentation`、認識起動計画は `RecognitionPlan`、円形／本文表示の判断は `overlay::presentation` に分離しています。エンジンは `EngineConfig` を受け取り、設定ファイルを直接読みません。入力・録音の結合・全文PCM蓄積は表示設定から独立しています。ライブ無効時もバッチへの全文入力と終了待ちは維持します。コピーはGUIが完了イベントから要求し、専用デスクトップサービスが実行します。
 
@@ -255,9 +269,9 @@ BLE切断時は収集状態と保持済み音声を維持し、再接続後は�
 外部入力プログラムでマイクや別デバイスの録音APIを扱い、以下のJSONを1行ずつ標準出力へ出して毎回flushしてください。診断メッセージは標準エラーへ出します。外部プログラムは自身で必要なマイク権限を扱います。
 
 ```sh
-cargo run --release -- stream --input-command /absolute/path/to/input-adapter
+cargo run --release -p dictation -- stream --input-command /absolute/path/to/input-adapter
 # 同じ入力をGUIで使う
-INDEX_VOICE_INPUT_COMMAND=/absolute/path/to/input-adapter cargo run --release -- gui
+INDEX_VOICE_INPUT_COMMAND=/absolute/path/to/input-adapter cargo run --release -p dictation -- gui
 ```
 
 ```json
@@ -273,10 +287,10 @@ JSONLは1行16MiBまでです。大きな音声は上記の`audio`を複数回�
 
 ### 認識モデルを追加する
 
-Rust内で`SpeechEngine`を実装してファクトリーに登録するか、外部プロセスアダプターを指定します。SpeechAnalyzer、Qwen3-ASR MLX、従来CLI用Whisperのアダプターを実装済みです。Qwenの推論実装は`src/qwen/`、常駐ワーカーの入口は`src/bin/qwen_native.rs`です。CLI・GUIと共通のCargo.tomlでビルドします。モデルのセットアップは`src/qwen_setup.rs`、モデル・実行ファイルの準備判定は`src/qwen_runtime.rs`に分離しています。
+Rust内で`SpeechEngine`を実装してファクトリーに登録するか、外部プロセスアダプターを指定します。SpeechAnalyzer、Qwen3-ASR MLX、従来CLI用Whisperのアダプターを実装済みです。Qwenの推論実装は`crates/qwen-asr/src/qwen/`、常駐ワーカーの入口は`crates/qwen-asr/src/bin/qwen_native.rs`です。mlx-cのビルドはこのクレートだけが行います。モデルのセットアップは`apps/dictation/src/qwen_setup.rs`、モデル・実行ファイルの準備判定は`apps/dictation/src/qwen_runtime.rs`に分離しています。
 
 ```sh
-INDEX_VOICE_SPEECH_COMMAND=/absolute/path/to/speech-adapter cargo run --release -- gui
+INDEX_VOICE_SPEECH_COMMAND=/absolute/path/to/speech-adapter cargo run --release -p dictation -- gui
 ```
 
 外部エンジンは引数に言語（例`ja-JP`）と`live`または`batch`を受け取ります。2プロセスが独立して起動します。標準入出力はJSON Lines、PCM送信前に連続DCフィルターを適用します。
@@ -296,27 +310,28 @@ INDEX_VOICE_SPEECH_COMMAND=/absolute/path/to/speech-adapter cargo run --release 
 
 ## 実装・検証
 
-Rust側にTelesto転送・DDRiceデコード・録音結合・連続フィルター・プロセス監視・表示・HTTPサーバーを実装しています。`native/Bluetooth.swift`はCoreBluetoothの橋渡し、`native/AudioDecode.swift`はAVFoundationのデコード、`native/SpeechStream.swift`はSpeechAnalyzerを担当します。必要なソース・依存関係はこのプロジェクト内で完結しています。
+Rust側にTelesto転送・DDRiceデコード・録音結合・連続フィルター・プロセス監視・表示・HTTPサーバーを実装しています。`crates/pebble-ring/native/Bluetooth.swift`はCoreBluetoothの橋渡し、`apps/dictation/native/AudioDecode.swift`はAVFoundationのデコード、`apps/dictation/native/SpeechStream.swift`はSpeechAnalyzerを担当します。必要なソース・依存関係はこのプロジェクト内で完結しています。
 
 ```sh
 # 画面・BLE・マイクを起動しない回帰テスト
-cargo test --release --lib --bin pebble-index --bin index-voice \
-  --test adapters --test reception_pipeline --test ipc_limits \
+cargo test --release -p pebble-core -p pebble-ring -p qwen-asr --lib \
   --test qwen_numerics --test qwen_runtime --test qwen_worker_runtime
+cargo test --release -p dictation --bin pebble-index --bin index-voice \
+  --test adapters --test reception_pipeline --test ipc_limits
 
 # 全ターゲット（従来のGUI/BLE経路を扱うテストも含む）
-cargo test
-cargo clippy --all-targets -- -D warnings
+cargo test --workspace
+cargo clippy --workspace --all-targets -- -D warnings
 
 # macOS上のSpeechAnalyzerを実際に使う。リング操作・マイク入力なし。
-cargo test --test speech_runtime -- --ignored --nocapture
-cargo test --test file_runtime -- --ignored --nocapture
+cargo test -p dictation --test speech_runtime -- --ignored --nocapture
+cargo test -p dictation --test file_runtime -- --ignored --nocapture
 
 # ダウンロード済みのWhisper large-v3で全文認識・連続ライブ認識を確認
-cargo test --test whisper_runtime -- --ignored --nocapture
+cargo test -p dictation --test whisper_runtime -- --ignored --nocapture
 
 # macOSのBLE探索を実際に30秒実行。接続・ペアリングは行わない。
-cargo test --test bluetooth_runtime -- --ignored --nocapture
+cargo test -p dictation --test bluetooth_runtime -- --ignored --nocapture
 ```
 
 SpeechAnalyzerについて、20回連続の認識（3分音声を含む）、最初の解放前のライブ出力、全20件の最終結果、0〜180秒の確定区間、子プロセスの終了を確認しています。合成音声は一時ディレクトリ内で作成し、終了時に削除します。
@@ -342,7 +357,7 @@ Macの実際のBLE探索でリングを検出し、30秒探索がIPCの待機期
 
 検出・状態遷移・音声投入・割当フックは別モジュールです。
 
-- `src/reception/button_detector.rs` は83の既出prefixと再送を除き、新しいshort/longを取り出します。末尾bitや音声長だけで分類しません。
+- `crates/pebble-ring/src/reception/button_detector.rs` は83の既出prefixと再送を除き、新しいshort/longを取り出します。末尾bitや音声長だけで分類しません。
 - S=trueで音声を保持し、初期値50msの表示待ち後も収集中なら録音表示を始めます。この50msは表示の方針で、リング側のshort/longの閾値ではありません。
 - falseまたは対応するfinalから50msの再開猶予を設けます。猶予後はliveへの新規投入を止め、遅配音声を回収します。別sourceの結合は猶予内に再開したlong同士に限定します。
 - ダブルタップに動作を割り当てている場合、short+finalの確定後は100ms、次操作を待ちます。次もshortならDouble、trueが続いてlongならSingle→録音です。期限内に次の件数変化・未解析Cが分かった場合だけ、そのデータの解析を待ちます。2回目の転送所要時間を単押し全体の待ち時間には加えません。
@@ -352,7 +367,7 @@ Macの実際のBLE探索でリングを検出し、30秒探索がIPCの待機期
 - 音量通知はlive有効・無効にかかわらず受信PCMから作ります。表示はバックエンドの状態に従い、UIは独自の押下タイマーを持ちません。
 - `Settings.reception` の `hold_ui_delay_ms`、`long_resume_grace_ms`、`tap_sequence_grace_ms`、`live_chunk_ms`、`state_poll_interval_ms` で調整できます。ファイル変更後はリロードしてください。候補作成時に設定を固定します。
 
-詳細は [デスクトップ入力の構成](docs/desktop-interaction.md) を参照してください。BLE取得時間があるため、物理操作から50ms以内の表示を保証するものではありません。
+詳細は [デスクトップ入力の構成](apps/dictation/docs/desktop-interaction.md) を参照してください。BLE取得時間があるため、物理操作から50ms以内の表示を保証するものではありません。
 
 ### 編集と履歴
 
@@ -369,7 +384,7 @@ Macの実際のBLE探索でリングを検出し、30秒探索がIPCの待機期
 ### On Device（Qwen3-ASR MLX）の実行環境
 
 - モデル: [moona3k/mlx-qwen3-asr-1.7b-8bit](https://huggingface.co/moona3k/mlx-qwen3-asr-1.7b-8bit)（8bit、約2.2 GB）。日本語は`Japanese`を明示して認識します。
-- 実装: `src/qwen/` のRust＋MLX C API。mlx-cとMLXのrevisionを固定しています。MLX C++とAppleのMetal等を使用し、Python・uv・PyTorchは実行依存に含めません。[出典とライセンス](licenses/qwen/NOTICE)。
+- 実装: `crates/qwen-asr/src/qwen/` のRust＋MLX C API。mlx-cとMLXのrevisionを固定しています。MLX C++とAppleのMetal等を使用し、Python・uv・PyTorchは実行依存に含めません。[出典とライセンス](apps/dictation/licenses/qwen/NOTICE)。
 - 保存先: `~/Library/Application Support/Index Voice/qwen-mlx/model/`。既存の検証済み重みを再利用します。旧`.venv`は参照せず、削除もしません。
 - `.app`には`QwenNative`、`mlx.metallib`、ライセンスを同梱します。実行時にリポジトリやコンパイラーは不要です。開発時は`INDEX_VOICE_QWEN_BINARY`で隣に`mlx.metallib`がある実行ファイルを指定できます。
 - 初回移行時も`setup-qwen`を実行してください。既存ファイルのSHA-256を確認し、`native-model.json`を原子的に更新します。準備判定ではモデルのrevision、各ファイルのサイズ・更新時刻、ネイティブ実行ファイルとMetalリソースを確認します。
@@ -378,7 +393,7 @@ Macの実際のBLE探索でリングを検出し、30秒探索がIPCの待機期
 - 受信・ACKと推論を分離し、キャンセル前の結果は録音ID・世代番号で破棄します。受領済みPCMと認識に反映済みのPCMを別々に数え、最終結果が全入力を覆うことを確認します。録音ごとにストリーミング状態とリサンプラーを作り直します。
 - ライブ認識では冒頭の無音を保留し、発話の200 ms前からモデルへ渡します。発話開始後の間や語尾は削りません。非常に小さい声は開始判定が遅れる場合があります。
 - BLE転送中の状態照会の重複と、転送直後の固定待ちを除去しています。小さいタップデータの回収では状態照会を省きます。音声の生成速度がBLEの実効転送速度を上回る場合、リング側に転送待ちが残るため、認識エンジンだけでは遅延を解消できません。
-- 選定理由・日本語精度とストリーミング方式の比較は[ASRモデル比較](docs/asr-model-selection.md)を参照してください。
+- 選定理由・日本語精度とストリーミング方式の比較は[ASRモデル比較](apps/dictation/docs/asr-model-selection.md)を参照してください。
 
 ### BLE受信の診断
 

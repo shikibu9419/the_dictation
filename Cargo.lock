@@ -1600,6 +1600,37 @@ dependencies = [
 ]
 
 [[package]]
+name = "dictation"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "base64 0.22.1",
+ "chrono",
+ "clap",
+ "fs2",
+ "futures",
+ "gpui",
+ "gpui-component",
+ "hound",
+ "libc",
+ "log",
+ "pebble-core",
+ "pebble-ring",
+ "pebble-ui",
+ "raw-window-handle",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "subtle",
+ "tempfile",
+ "tokio",
+ "tower",
+ "uuid",
+ "whisper-rs",
+]
+
+[[package]]
 name = "digest"
 version = "0.10.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4344,6 +4375,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "openai-realtime"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "openssl-probe"
 version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4442,35 +4482,42 @@ dependencies = [
 ]
 
 [[package]]
-name = "pebble-index"
+name = "pebble-core"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "axum",
- "base64 0.22.1",
- "cc",
  "chrono",
- "clap",
- "cmake",
  "fs2",
- "futures",
- "gpui",
- "gpui-component",
- "hound",
  "libc",
- "log",
- "raw-window-handle",
+ "serde_json",
+ "sha2 0.10.9",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
+name = "pebble-ring"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "base64 0.22.1",
+ "chrono",
+ "pebble-core",
  "serde",
  "serde_json",
  "sha2 0.10.9",
- "subtle",
  "tempfile",
- "tokenizers",
  "tokio",
- "tower",
- "tracing",
  "uuid",
- "whisper-rs",
+]
+
+[[package]]
+name = "pebble-ui"
+version = "0.1.0"
+dependencies = [
+ "cc",
+ "gpui",
+ "gpui-component",
 ]
 
 [[package]]
@@ -4854,6 +4901,20 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1fbf4db142a473a8d80c26bbf18454ed458bf8d26c8219c331daecfdbd079001"
 dependencies = [
  "proc-macro2",
+]
+
+[[package]]
+name = "qwen-asr"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "base64 0.22.1",
+ "cmake",
+ "hound",
+ "serde",
+ "serde_json",
+ "tokenizers",
+ "tracing",
 ]
 
 [[package]]

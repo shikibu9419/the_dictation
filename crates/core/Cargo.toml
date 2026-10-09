@@ -1,0 +1,16 @@
+[package]
+name = "pebble-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Process, logging, configuration and PCM utilities shared by the desktop apps"
+
+[dependencies]
+anyhow.workspace = true
+chrono.workspace = true
+fs2.workspace = true
+libc.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+tempfile.workspace = true
+tokio.workspace = true

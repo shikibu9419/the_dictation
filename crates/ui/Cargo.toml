@@ -1,0 +1,14 @@
+[package]
+name = "pebble-ui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Presentation-only GPUI components and the macOS floating panel bridge"
+
+[dependencies]
+gpui.workspace = true
+gpui-component.workspace = true
+raw-window-handle.workspace = true
+
+[build-dependencies]
+cc.workspace = true
