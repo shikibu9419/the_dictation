@@ -342,6 +342,43 @@ impl SessionState {
         )
     }
 
+    /// Read-only attribution for a current audio-level preview. This must not
+    /// consume button history, claim a source or advance final/PCM progress.
+    pub fn meter_session(&self, first: u64) -> Option<SessionId> {
+        let active = self.sessions.get(&self.active?)?;
+        if !active.collecting || active.failed || active.submitted || !self.connected {
+            return None;
+        }
+        let effective = active
+            .resume
+            .filter(|r| r.within_grace)
+            .map_or(active.id, |r| r.parent);
+        if !active.shown && !self.sessions.get(&effective).is_some_and(|s| s.shown) {
+            return None;
+        }
+        if let Some(source) = self
+            .sources
+            .values()
+            .find(|s| s.observation.first_collection == first)
+        {
+            return (self.source_session(&source.observation.id) == Some(effective)
+                && !source.observation.final_seen)
+                .then_some(effective);
+        }
+        let eligible: Vec<_> = self
+            .sessions
+            .values()
+            .filter(|s| {
+                !s.submitted
+                    && !s.failed
+                    && s.sources.is_empty()
+                    && first >= s.first
+                    && s.upper.is_none_or(|end| first < end)
+            })
+            .collect();
+        (eligible.len() == 1 && eligible[0].id == active.id).then_some(effective)
+    }
+
     fn validate_observation(&self, observation: &Observation) -> Result<()> {
         match observation {
             Observation::Watermark {

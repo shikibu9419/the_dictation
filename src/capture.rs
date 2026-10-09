@@ -36,6 +36,12 @@ impl Received {
         self.observation_sequence += 1;
         event["received_ms"] = json!(self.observation_origin.elapsed().as_millis() as u64);
         event["received_seq"] = json!(self.observation_sequence);
+        if matches!(
+            event["type"].as_str(),
+            Some("collection" | "meter_collection")
+        ) {
+            event["received_at_ms"] = json!(chrono::Utc::now().timestamp_millis());
+        }
         if let Some(tx) = &self.outbound {
             tx.send(event).context("Recognition worker closed")?;
         }
@@ -203,6 +209,7 @@ async fn download(
         received.next.unwrap_or(start),
         state.collection_count,
     )?;
+    scheduler.collecting(state.in_collection_state && received.outbound.is_some() && !fetch);
     received.next = Some(scheduler.cursor());
     let mut caught_up = false;
     loop {
@@ -253,6 +260,8 @@ async fn download(
             Request::State => {
                 state = received.read(ble.state(args.timeout)).await?;
                 scheduler.state(state.collection_count, received.millis())?;
+                scheduler
+                    .collecting(state.in_collection_state && received.outbound.is_some() && !fetch);
                 received.state(&state)?;
             }
             Request::Range => {
@@ -277,8 +286,10 @@ async fn download(
                 };
                 // Deliver every C immediately, independent of S deadlines and
                 // recognition work. Do not batch small records or delay meters.
-                received
-                    .send(json!({"type":"collection","index":index,"raw":STANDARD.encode(&raw)}))?;
+                received.send(
+                    json!({"type":"collection","index":index,"raw":STANDARD.encode(&raw),
+                        "meter_current":scheduler.newest(index)}),
+                )?;
                 scheduler.collection(index)?;
                 received.next = Some(scheduler.cursor());
                 received.connection.activity(received.millis());
@@ -286,6 +297,25 @@ async fn download(
                 output.debug(format!(
                     "collection={index} transfer took {:.3}s",
                     began.elapsed().as_secs_f64()
+                ));
+            }
+            Request::Preview(index) => {
+                let raw = if let Some(raw) = cached.get(&index) {
+                    raw.clone()
+                } else {
+                    received.read(ble.collection(index, args.timeout)).await?
+                };
+                // This does not advance the collection cursor or classify final/
+                // gesture metadata. The same bytes are delivered in order later.
+                received.send(
+                    json!({"type":"meter_collection","index":index,"raw":STANDARD.encode(&raw)}),
+                )?;
+                cached.insert(index, raw);
+                scheduler.preview(index)?;
+                output.debug(format!(
+                    "BLE meter preview collection={index} ordered_cursor={} cached={}",
+                    scheduler.cursor(),
+                    cached.len()
                 ));
             }
         }

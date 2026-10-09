@@ -18,6 +18,8 @@ pub enum Request {
     State,
     Range,
     Collection(u16),
+    /// Read a recent C for metering, then reuse it when the ordered cursor arrives.
+    Preview(u16),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -41,6 +43,9 @@ pub struct Scheduler {
     state_since_work: bool,
     last_work: Option<Request>,
     in_flight: Option<(Request, u64)>,
+    collecting: bool,
+    previewed: Option<u16>,
+    preview_credit: bool,
 }
 
 impl Scheduler {
@@ -68,11 +73,22 @@ impl Scheduler {
             state_since_work: false,
             last_work: None,
             in_flight: None,
+            collecting: false,
+            previewed: None,
+            preview_credit: true,
         })
     }
 
     pub fn cursor(&self) -> u16 {
         self.cursor
+    }
+
+    pub fn collecting(&mut self, active: bool) {
+        self.collecting = active;
+    }
+
+    pub fn newest(&self, index: u16) -> bool {
+        self.collecting && !self.range_needed && index == self.end.wrapping_sub(1)
     }
 
     pub fn caught_up(&self) -> bool {
@@ -93,6 +109,12 @@ impl Scheduler {
             || (periodic_range && (!backlog || self.last_work != Some(Request::Range)))
         {
             Some(Request::Range)
+        } else if self.collecting
+            && self.preview_credit
+            && self.end.wrapping_sub(self.cursor) > 1
+            && self.previewed != Some(self.end.wrapping_sub(1))
+        {
+            Some(Request::Preview(self.end.wrapping_sub(1)))
         } else if backlog {
             Some(Request::Collection(self.cursor))
         } else {
@@ -141,6 +163,9 @@ impl Scheduler {
         self.cursor = if range_regressed((self.start, self.end), (start, end)) {
             // Old cached S belongs to the previous counter generation.
             self.state_due = started;
+            self.state_since_work = false;
+            self.previewed = None;
+            self.preview_credit = true;
             start
         } else {
             clamp_cursor(self.cursor, start, end)
@@ -148,7 +173,8 @@ impl Scheduler {
         self.start = start;
         self.end = end;
         self.range_needed = false;
-        self.state_since_work = false;
+        // A slow R must not force another S between the previous S and C.
+        // Keep that S's credit until an audio transfer has made progress.
         self.last_work = Some(Request::Range);
         Ok(())
     }
@@ -159,6 +185,16 @@ impl Scheduler {
         self.range_needed |= self.cursor == self.end;
         self.state_since_work = false;
         self.last_work = Some(Request::Collection(index));
+        self.preview_credit = true;
+        Ok(())
+    }
+
+    pub fn preview(&mut self, index: u16) -> Result<()> {
+        self.finish(Request::Preview(index))?;
+        self.previewed = Some(index);
+        self.preview_credit = false; // At least one ordered C between previews.
+        self.state_since_work = false;
+        self.last_work = Some(Request::Preview(index));
         Ok(())
     }
 }
@@ -273,13 +309,86 @@ mod tests {
         s.state(4, 1_100).unwrap();
         assert_eq!(read(&mut s, 1_100), Request::Range);
         s.range(1, 4).unwrap();
-        assert_eq!(read(&mut s, 2_200), Request::State);
-        s.state(4, 3_300).unwrap();
-        assert_eq!(read(&mut s, 3_300), Request::Collection(1));
+        assert_eq!(read(&mut s, 2_200), Request::Collection(1));
         s.collection(1).unwrap();
         assert_eq!(read(&mut s, 3_310), Request::State);
         s.state(4, 3_320).unwrap();
         assert_eq!(read(&mut s, 3_320), Request::Range);
+    }
+
+    #[test]
+    fn previews_do_not_advance_the_cursor_or_starve_ordered_audio() {
+        let mut s = Scheduler::new(50, 0, 0, 1, 10, 1, 10).unwrap();
+        s.collecting(true);
+        assert_eq!(read(&mut s, 50), Request::State);
+        s.state(10, 1100).unwrap();
+        assert_eq!(read(&mut s, 1100), Request::Range);
+        s.range(1, 10).unwrap();
+        assert_eq!(read(&mut s, 1160), Request::Preview(9));
+        s.preview(9).unwrap();
+        assert_eq!(s.cursor(), 1);
+        assert_eq!(read(&mut s, 1500), Request::State);
+        s.state(12, 1560).unwrap();
+        assert_eq!(read(&mut s, 1560), Request::Collection(1));
+        s.collection(1).unwrap();
+        assert_eq!(read(&mut s, 2300), Request::State);
+        s.state(12, 2360).unwrap();
+        assert_eq!(read(&mut s, 2360), Request::Range);
+        s.range(1, 12).unwrap();
+        assert_eq!(read(&mut s, 2420), Request::Preview(11));
+        s.preview(11).unwrap();
+        s.collecting(false);
+        assert_eq!(read(&mut s, 2800), Request::State);
+        s.state(12, 2860).unwrap();
+        assert_eq!(read(&mut s, 2860), Request::Collection(2));
+        assert!(!s.newest(11));
+    }
+
+    #[test]
+    fn newest_preview_is_read_once_and_all_audio_is_reused_in_order() {
+        for first in [1u16, 65532] {
+            let end = first.wrapping_add(10);
+            let mut s = Scheduler::new(50, 0, 0, first, end, first, end as u8).unwrap();
+            s.collecting(true);
+            let mut cached = std::collections::HashSet::new();
+            let mut reads = vec![];
+            let mut delivered = vec![];
+            let mut now = 0;
+            while delivered.len() < 10 {
+                now += 1;
+                match read(&mut s, now) {
+                    Request::State => {
+                        now += 60;
+                        s.state(end as u8, now).unwrap();
+                    }
+                    Request::Range => {
+                        s.range(first, end).unwrap();
+                        now += 60;
+                    }
+                    Request::Preview(index) => {
+                        assert!(cached.insert(index));
+                        reads.push(index);
+                        now += 400;
+                        s.preview(index).unwrap();
+                    }
+                    Request::Collection(index) => {
+                        if !cached.remove(&index) {
+                            reads.push(index);
+                            now += 400;
+                        }
+                        delivered.push(index);
+                        s.collection(index).unwrap();
+                    }
+                }
+            }
+            assert_eq!(reads.len(), 10);
+            assert_eq!(reads[0], end.wrapping_sub(1));
+            assert_eq!(
+                delivered,
+                (0..10).map(|n| first.wrapping_add(n)).collect::<Vec<_>>()
+            );
+            assert!(cached.is_empty());
+        }
     }
 
     #[test]

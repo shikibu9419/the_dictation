@@ -139,6 +139,9 @@ impl Interaction {
     pub fn source_session(&self, source: &str) -> Option<SessionId> {
         self.machine.source_session(source)
     }
+    pub fn meter_key(&self, first: u64) -> Option<String> {
+        self.machine.meter_session(first).map(|id| self.key(id))
+    }
     pub fn ensure_flushed(&self) -> Result<()> {
         ensure!(
             !self.machine.waiting_for_input(),

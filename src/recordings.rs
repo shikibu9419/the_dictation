@@ -64,6 +64,15 @@ struct StoredPart {
     digest: [u8; 32],
     part: Part,
 }
+struct Prepared {
+    digest: [u8; 32],
+    item: Collection,
+}
+
+pub struct MeterPreview {
+    pub first: u64,
+    pub level: f64,
+}
 struct Source {
     epoch: uuid::Uuid,
     first: u64,
@@ -102,6 +111,10 @@ pub struct Recordings {
     collections: usize,
     pending: usize,
     limits: Limits,
+    // Recent out-of-order reads are decoded for metering only. They cannot
+    // change source ownership, final state, button history or PCM cursors.
+    prepared: BTreeMap<u64, Prepared>,
+    prepared_samples: usize,
 }
 impl Default for Recordings {
     fn default() -> Self {
@@ -124,6 +137,8 @@ impl Recordings {
             collections: 0,
             pending: 0,
             limits: Limits::default(),
+            prepared: BTreeMap::new(),
+            prepared_samples: 0,
         }
     }
     pub fn position(&self, index: u16) -> u64 {
@@ -174,7 +189,72 @@ impl Recordings {
         self.last_range = None;
         self.released.clear();
         self.released_order.clear();
+        self.clear_prepared();
         Ok(())
+    }
+    fn clear_prepared(&mut self) {
+        self.prepared.clear();
+        self.prepared_samples = 0;
+    }
+    fn take_prepared(&mut self, position: u64) -> Option<Prepared> {
+        let prepared = self.prepared.remove(&position)?;
+        self.prepared_samples -= prepared.item.samples.as_ref().map_or(0, Vec::len);
+        Some(prepared)
+    }
+    pub fn prepare_meter(&mut self, index: u16, raw: &[u8]) -> Result<Option<MeterPreview>> {
+        ensure!(raw.len() <= 655360, "Collection exceeds receive size limit");
+        let position = self.position(index);
+        let digest: [u8; 32] = Sha256::digest(raw).into();
+        let item = if let Some(prepared) = self.take_prepared(position) {
+            ensure!(
+                prepared.digest == digest,
+                "Conflicting prefetched collection={index}"
+            );
+            prepared.item
+        } else {
+            decode(raw)?
+        };
+        let first = if item.multipart {
+            let start = item
+                .start
+                .context("Multipart recording lacks starting collection count")?;
+            let distance = u64::from(index.wrapping_sub(start as u16));
+            ensure!(distance < 32768, "Ambiguous multipart collection offset");
+            position
+                .checked_sub(distance)
+                .context("Invalid source start")?
+        } else {
+            position
+        };
+        let preview = if item.multipart
+            && !item.final_part
+            && self.boundary.is_none_or(|boundary| first >= boundary)
+            && self.available_start.is_none_or(|start| first >= start)
+        {
+            item.samples
+                .as_deref()
+                .zip(item.rate)
+                .map(|(samples, rate)| MeterPreview {
+                    first,
+                    level: crate::audio_level::latest_slice(samples, rate),
+                })
+        } else {
+            None
+        };
+        // Bounded optimization; eviction only causes a later re-decode, never
+        // audio loss. Raw bytes remain in the receiver until ordered delivery.
+        let count = item.samples.as_ref().map_or(0, Vec::len);
+        const MAX_SAMPLES: usize = 8 * 1024 * 1024;
+        while !self.prepared.is_empty()
+            && (self.prepared.len() >= 512 || self.prepared_samples + count > MAX_SAMPLES)
+        {
+            self.take_prepared(*self.prepared.first_key_value().unwrap().0);
+        }
+        if count <= MAX_SAMPLES {
+            self.prepared_samples += count;
+            self.prepared.insert(position, Prepared { digest, item });
+        }
+        Ok(preview)
     }
     pub fn add(&mut self, index: u16, raw: &[u8], output: &Output) -> Result<Received> {
         ensure!(raw.len() <= 655360, "Collection exceeds receive size limit");
@@ -185,7 +265,15 @@ impl Recordings {
             ));
             return Ok(Received::default());
         }
-        let item = decode(raw)?; // One TLV pass; diagnostics and gestures reuse its headers.
+        let item = if let Some(prepared) = self.take_prepared(position) {
+            ensure!(
+                prepared.digest == <[u8; 32]>::from(Sha256::digest(raw)),
+                "Conflicting prefetched collection={index}"
+            );
+            prepared.item
+        } else {
+            decode(raw)?
+        }; // Reuse preview PCM; no repeated TLV/audio decoding.
         let (first, origin) = if item.multipart {
             let start = item
                 .start
@@ -372,6 +460,7 @@ impl Recordings {
             },
         );
         if discontinuity {
+            self.clear_prepared();
             let previous = self.epoch;
             self.epoch = uuid::Uuid::new_v4();
             end_position = (self.high_water.unwrap_or(0) / 65536 + 2) * 65536 + u64::from(end);
@@ -387,6 +476,15 @@ impl Recordings {
         );
         self.last_range = Some((start_position, end_position));
         self.available_start = Some(start_position);
+        let expired: Vec<_> = self
+            .prepared
+            .keys()
+            .copied()
+            .filter(|n| *n < start_position || *n >= end_position)
+            .collect();
+        for position in expired {
+            self.take_prepared(position);
+        }
         let mut lost = vec![];
         for (key, source) in &mut self.sources {
             if !source.complete()
@@ -454,6 +552,62 @@ mod tests {
     use super::*;
     fn output() -> Output {
         Output::new(false, None).unwrap()
+    }
+    #[test]
+    fn meter_preparation_reuses_pcm_without_advancing_sources_or_completeness() {
+        let out = output();
+        let mut store = Recordings::new("meter-ring");
+        store.reset(1).unwrap();
+        store.retain(1, 4, &out).unwrap();
+        let raw = chunk(1, false, &[7, -7]);
+        assert!(store.prepare_meter(2, &raw).unwrap().is_some());
+        assert!(store.sources.is_empty());
+        assert_eq!(store.samples, 0);
+        let ptr = store.prepared[&store.position(2)]
+            .item
+            .samples
+            .as_ref()
+            .unwrap()
+            .as_ptr();
+        let first = store.add(1, &chunk(1, false, &[1, 2]), &out).unwrap();
+        let key = first.source.unwrap();
+        let second = store.add(2, &raw, &out).unwrap();
+        assert_eq!(
+            second.parts[0].samples.slices().next().unwrap().as_ptr(),
+            ptr
+        );
+        assert!(store.prepared.is_empty());
+        assert_eq!(store.prepared_samples, 0);
+        assert!(store.whole(&key).is_err());
+        assert!(
+            store
+                .prepare_meter(3, &chunk(1, true, &[3]))
+                .unwrap()
+                .is_none()
+        );
+        assert!(store.whole(&key).is_err()); // Preview final is not a source event.
+        store.add(3, &chunk(1, true, &[3]), &out).unwrap();
+        assert_eq!(samples(&store.whole(&key).unwrap()), [1, 2, 7, -7, 3]);
+    }
+
+    #[test]
+    fn prepared_audio_is_bounded_and_dropped_at_counter_discontinuities() {
+        let out = output();
+        let mut store = Recordings::new("meter-ring");
+        store.reset(1).unwrap();
+        for index in 1..=513 {
+            store.prepare_meter(index, &chunk(1, false, &[2])).unwrap();
+        }
+        assert_eq!(store.prepared.len(), 512);
+        assert_eq!(store.prepared_samples, 512);
+        store.retain(510, 514, &out).unwrap();
+        assert_eq!(store.prepared.len(), 4);
+        assert!(store.retain(1, 2, &out).unwrap().discontinuity);
+        assert!(store.prepared.is_empty());
+        assert_eq!(store.prepared_samples, 0);
+        let raw = chunk(1, false, &[2]);
+        store.prepare_meter(1, &raw).unwrap();
+        assert!(store.add(1, &chunk(1, false, &[3]), &out).is_err());
     }
     #[test]
     fn range_wrap_preserves_epoch_and_initial_fetch_orders_wrapped_collections() {

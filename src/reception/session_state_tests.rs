@@ -646,3 +646,27 @@ fn default_tap_window_accepts_measured_241_and_270_ms_gaps_but_not_late_taps() {
     assert!(gestures(&audio(&mut m, 301, "b", 2, Some(Press::Short), true)).is_empty());
     assert_eq!(gestures(&m.tick(601).unwrap()), [Gesture::SinglePush]);
 }
+
+#[test]
+fn meter_previews_are_read_only_and_cannot_revive_released_or_old_recordings() {
+    let mut m = SessionState::default();
+    let id = state(&mut m, 0, true, 10).snapshot.session_id.unwrap();
+    assert_eq!(m.meter_session(10), None); // Hidden tap candidate.
+    m.tick(50).unwrap();
+    let before = m.snapshot();
+    assert_eq!(m.meter_session(10), Some(id));
+    assert_eq!(m.meter_session(9), None);
+    assert_eq!(m.snapshot(), before);
+    audio(&mut m, 60, "audio", 10, None, false);
+    assert_eq!(m.meter_session(10), Some(id));
+    assert_eq!(m.meter_session(11), None); // Cannot claim another unknown source.
+    state(&mut m, 100, false, 11);
+    assert_eq!(m.meter_session(10), None);
+    m.observe(101, Observation::Connected(false)).unwrap();
+    assert_eq!(m.meter_session(10), None);
+    m.observe(102, Observation::Discontinuity { unread: 65537 })
+        .unwrap();
+    state(&mut m, 110, true, 65537);
+    m.tick(160).unwrap();
+    assert_eq!(m.meter_session(10), None);
+}

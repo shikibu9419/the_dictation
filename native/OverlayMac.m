@@ -62,14 +62,19 @@ void index_panel_audio(double level, bool active) {
         }
         audioTarget = isfinite(level) ? fmax(0, fmin(1, level)) : 0;
         audioUpdated = CACurrentMediaTime();
+        // React in this main-queue turn. Waiting for the next timer tick and
+        // averaging the attack again added visible lag to every BLE update.
+        audioEnvelope = audioTarget;
+        applyAudioGlow(audioEnvelope);
         if (audioTimer) return;
-        audioTimer = [NSTimer scheduledTimerWithTimeInterval:1.0 / 30 repeats:YES block:^(NSTimer *timer) {
+        audioTimer = [NSTimer timerWithTimeInterval:1.0 / 60 repeats:YES block:^(NSTimer *timer) {
             double age = CACurrentMediaTime() - audioUpdated;
-            double target = audioTarget * exp(-fmax(0, age - 0.15) / 0.25);
-            double smoothing = target > audioEnvelope ? 0.55 : 0.18;
-            audioEnvelope += (target - audioEnvelope) * smoothing;
+            // Decay only when no fresh level is available, with no second
+            // low-pass filter that keeps old speech glowing after it ended.
+            audioEnvelope = audioTarget * exp(-fmax(0, age - 0.10) / 0.12);
             applyAudioGlow(audioEnvelope);
         }];
+        [[NSRunLoop mainRunLoop] addTimer:audioTimer forMode:NSRunLoopCommonModes];
     });
 }
 

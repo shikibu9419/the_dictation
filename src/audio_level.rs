@@ -19,9 +19,36 @@ pub fn normalized_iter(samples: impl Iterator<Item = i16> + Clone) -> f64 {
     ((20. * rms.log10() + 55.) / 43.).clamp(0., 1.)
 }
 
+/// Display the newest 40 ms, not the RMS of up to a second of older audio.
+pub fn latest(samples: &crate::pcm::Pcm, rate: u32) -> f64 {
+    let count = (rate as usize * 40 / 1000).max(1);
+    let tail = samples.range(samples.len().saturating_sub(count)..samples.len());
+    normalized_iter(tail.iter().copied())
+}
+
+pub fn latest_slice(samples: &[i16], rate: u32) -> f64 {
+    let count = (rate as usize * 40 / 1000).max(1);
+    normalized_iter(
+        samples[samples.len().saturating_sub(count)..]
+            .iter()
+            .copied(),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn latest_window_reacts_to_onsets_and_silence_without_averaging_old_audio() {
+        let mut samples = vec![0; 960];
+        samples.extend((0..40).map(|i| if i % 2 == 0 { 16000 } else { -16000 }));
+        assert!(latest_slice(&samples, 1000) > 0.9);
+        let pcm: crate::pcm::Pcm = samples.clone().into();
+        assert_eq!(latest(&pcm, 1000), latest_slice(&samples, 1000));
+        samples.extend([0; 40]);
+        assert_eq!(latest_slice(&samples, 1000), 0.);
+        assert_eq!(latest(&samples.into(), 1000), 0.);
+    }
     #[test]
     fn silence_and_dc_do_not_light_up_the_meter() {
         assert_eq!(normalized(&[]), 0.);

@@ -34,6 +34,7 @@ pub struct IndexInput {
     legacy_clock: Instant,
     completed: Vec<String>,
     committed: Option<u64>,
+    last_meter: Option<u64>,
 }
 impl IndexInput {
     pub fn new(address: &str, save_cursor: bool, settings: Settings) -> Result<Self> {
@@ -54,6 +55,7 @@ impl IndexInput {
             legacy_clock: Instant::now(),
             completed: vec![],
             committed: None,
+            last_meter: None,
         })
     }
     fn observe(&mut self, event: Observation, output: &Output) -> Result<Vec<InputEvent>> {
@@ -100,6 +102,17 @@ impl IndexInput {
 impl InputAdapter for IndexInput {
     fn decode(&mut self, message: Value, output: &Output) -> Result<Vec<InputEvent>> {
         self.timestamp(&message)?;
+        if let Some(received) = message["received_at_ms"].as_i64() {
+            output.debug(format!(
+                "Input delivery type={} collection={} queue_ms={}",
+                message["type"],
+                message["index"],
+                chrono::Utc::now()
+                    .timestamp_millis()
+                    .saturating_sub(received)
+                    .max(0)
+            ));
+        }
         let mut events = self.acknowledgements(output)?;
         match message["type"].as_str().context("Missing input type")? {
             "boundary" => {
@@ -182,6 +195,7 @@ impl InputAdapter for IndexInput {
                     self.committed = Some(range.start);
                     self.history = ButtonHistory::default();
                     self.classification.clear();
+                    self.last_meter = None;
                     self.collecting = None;
                     if self.save_cursor {
                         events.extend(self.observe(
@@ -213,6 +227,28 @@ impl InputAdapter for IndexInput {
                         output,
                     )?);
                     events.extend(self.observe(Observation::RangePending(false), output)?);
+                }
+            }
+            "meter_collection" => {
+                ensure!(
+                    self.initialized,
+                    "Meter preview arrived before startup boundary"
+                );
+                let index = u16::try_from(message["index"].as_u64().context("Missing index")?)?;
+                let raw =
+                    STANDARD.decode(message["raw"].as_str().context("Missing raw collection")?)?;
+                let position = self.recordings.position(index);
+                let preview = self.recordings.prepare_meter(index, &raw)?;
+                if self.last_meter.is_none_or(|last| position > last)
+                    && let Some(preview) = preview
+                    && let Some(key) = self.interaction.meter_key(preview.first)
+                {
+                    self.last_meter = Some(position);
+                    output.debug(format!("Audio meter preview collection={index} recording={key} level={:.3}; ordered_unread={}", preview.level, self.unread as u16));
+                    events.push(InputEvent::Level {
+                        key,
+                        level: preview.level,
+                    });
                 }
             }
             "collection" => {
@@ -266,7 +302,7 @@ impl InputAdapter for IndexInput {
                     output.debug(format!("Button history source={} collection={} evidence={:?} added={:?} classification={classification:?} lifetime_count={:?}",part.key, part.index, delta.evidence, delta.added, part.lifetime_count));
                     // Gap completion can release several C records at once. Normalize
                     // all their histories before a completed short retires the source.
-                    updates.insert(part.key.clone(), (classification, part.samples));
+                    updates.insert(part.key.clone(), (classification, part.samples, part.rate));
                     if position >= self.unread {
                         self.parsed.insert(position);
                     }
@@ -288,15 +324,18 @@ impl InputAdapter for IndexInput {
                         updates.entry(key).or_default();
                     }
                 }
-                for (key, (classification, samples)) in updates {
+                for (key, (classification, samples, rate)) in updates {
                     let observation = self.recordings.observation(&key, classification)?;
                     events.extend(self.observe(Observation::Source(observation), output)?);
                     if !samples.is_empty()
+                        && message["meter_current"] != false
+                        && self.last_meter.is_none_or(|last| position > last)
                         && let Some(session) = self.interaction.source_session(&key)
                     {
+                        self.last_meter = Some(position);
                         events.push(InputEvent::Level {
                             key: self.interaction.key(session),
-                            level: crate::audio_level::normalized_iter(samples.iter().copied()),
+                            level: crate::audio_level::latest(&samples, rate),
                         });
                     }
                 }

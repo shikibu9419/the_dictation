@@ -562,7 +562,8 @@ impl Recognition {
             && !self.lifecycle.lock().unwrap().suppressed(&key)
         {
             emit(json!({"type":"audio_level", "recording":key,
-                "level":crate::audio_level::normalized_iter(part.samples.iter().copied())}));
+                "emitted_at_ms":chrono::Utc::now().timestamp_millis(),
+                "level":crate::audio_level::latest(&part.samples, part.rate)}));
         }
         if !self.audio.contains_key(&key) {
             let empty = part.final_part && part.samples.is_empty();
@@ -630,7 +631,8 @@ impl Recognition {
                     .get(&key)
                     .is_some_and(|s| s.visible && s.live)
                 {
-                    emit(json!({"type":"audio_level", "recording":key, "level":level}));
+                    emit(json!({"type":"audio_level", "recording":key, "level":level,
+                        "emitted_at_ms":chrono::Utc::now().timestamp_millis()}));
                 }
             }
             InputEvent::State(collecting) => self.state(collecting)?,

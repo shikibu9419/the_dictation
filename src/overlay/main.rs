@@ -913,9 +913,12 @@ fn main() -> anyhow::Result<()> {
                             Message::Control(event, generation) if accepts_generation(this.backend.as_ref().map(|b| b.generation), generation) => {
                                 if event["type"] == "gesture" { this.gesture(&event, window, cx); }
                                 if event["type"] == "audio_level" {
+                                    let age = event["emitted_at_ms"].as_i64().map_or(0, |time|
+                                        chrono::Utc::now().timestamp_millis().saturating_sub(time).max(0));
                                     let active = !this.presentation.live_mode && this.model.visible().is_some_and(|item|
                                         item.phase == Phase::Recording && (item.recording.is_none() || item.recording.as_deref() == event["recording"].as_str()));
-                                    unsafe { index_panel_audio(event["level"].as_f64().unwrap_or(0.), active); }
+                                    if this.verbose { eprintln!("[GUI] Audio meter delivery_ms={age} active={active} stale={}", age > 500); }
+                                    if age <= 500 { unsafe { index_panel_audio(event["level"].as_f64().unwrap_or(0.), active); } }
                                 }
                                 if event["type"] == "paste_result" {
                                     this.pasting = false;

@@ -686,6 +686,48 @@ async fn ring_audio_uses_live_then_complete_batch_and_supports_a_second_recordin
 }
 
 #[tokio::test]
+async fn latest_audio_meter_precedes_backlog_without_skipping_pcm_or_applying_future_gestures() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut w = Worker::new(dir.path(), false).await;
+    w.send(1, json!({"type":"button_state","pressed":true,"unread":1}))
+        .await;
+    w.send(51, json!({"type":"clock"})).await;
+    w.send(52, json!({"type":"range","start":1,"end":5})).await;
+    let latest = collection(4, 1, false, 200, 0, 0);
+    let mut preview = latest.clone();
+    preview["type"] = json!("meter_collection");
+    w.send(60, preview).await;
+    let level = w.until(|v| v["type"] == "audio_level").await;
+    assert!(level["level"].as_f64().unwrap() > 0.);
+    assert!(batch_sizes(dir.path()).is_empty());
+    for index in 1..=4 {
+        let mut raw = collection(index, 1, false, 200, 0, 0);
+        raw["meter_current"] = json!(index == 4);
+        w.send(60 + index as u64, raw).await;
+    }
+    let mut final_c = collection(5, 1, true, 31, 1, 1);
+    final_c["meter_current"] = json!(false);
+    w.send(70, final_c).await;
+    w.send(120, json!({"type":"clock"})).await;
+    let final_result = w
+        .until(|v| v["type"] == "text" && v["mode"] == "batch")
+        .await;
+    assert_eq!(final_result["audio_seconds"], 0.831);
+    assert_eq!(batch_sizes(dir.path()), [831]);
+    assert_eq!(
+        w.events
+            .iter()
+            .filter(|v| v["type"] == "audio_level")
+            .count(),
+        1
+    );
+    assert!(w.events.iter().all(|v| v["type"] != "gesture"));
+    w.send(121, json!({"type":"flush"})).await;
+    w.until(|v| v["type"] == "flushed").await;
+    w.close().await;
+}
+
+#[tokio::test]
 async fn repeated_short_singletons_after_long_each_emit_one_tap_without_asr() {
     // Replay the metadata from C2804..2808 on 2026-10-09. Different completed
     // sources own [Long], [Short], [Short], [Short], [Short, Short].
