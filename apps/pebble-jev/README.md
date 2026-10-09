@@ -44,6 +44,12 @@ sh apps/pebble-jev/build-app.sh && open "target/Pebble Jev.app"
 ```sh
 cargo test -p pebble-jev
 cargo clippy -p pebble-jev --all-targets -- -D warnings
+
+# 実際に API へ接続する（キーは desktop/rust/.env の OPENAI_API_KEY）。
+# 2 つ目は macOS の say で合成した「牛乳を買うをTODOに追加して」を 1 ターン送り、
+# 文字起こし・add_todo の呼び出し・応答音声が届くことを確認します。
+set -a; source .env; set +a
+cargo test -p openai-realtime --test connect -- --ignored --nocapture --test-threads=1
 ```
 
 リング・Bluetooth・API 接続を伴う動作は実機で確認してください。`--verbose` で送受信ログを stderr に出します。

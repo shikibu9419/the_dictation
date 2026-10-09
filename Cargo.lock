@@ -4387,9 +4387,11 @@ dependencies = [
  "anyhow",
  "base64 0.22.1",
  "futures-util",
+ "hound",
  "rustls",
  "serde",
  "serde_json",
+ "tempfile",
  "tokio",
  "tokio-tungstenite",
 ]
