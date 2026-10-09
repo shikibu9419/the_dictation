@@ -33,7 +33,8 @@ unsafe extern "C" {
     fn index_panel_request_frame();
     fn index_panel_editing(editing: bool);
     fn index_panel_hide();
-    fn index_panel_audio(level: f64, active: bool);
+    fn index_panel_audio_state(recording: u64);
+    fn index_panel_audio_level(recording: u64, level: f64);
     fn index_panel_resize(width: f64, height: f64, circular: bool);
     fn index_reduce_motion() -> bool;
     fn index_panel_visible() -> bool;
@@ -307,6 +308,14 @@ impl Overlay {
         let height = if circular { 96. } else { body_height + 44. };
         (circular, text, body_height, height)
     }
+    fn audio_feedback_recording(&self) -> Option<&model::Item> {
+        if self.presentation.live_mode || self.pasting || self.model.error.is_some() {
+            return None;
+        }
+        self.model
+            .visible()
+            .filter(|item| item.phase == Phase::Recording)
+    }
     fn update_panel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.presentation_revision = self.presentation_revision.wrapping_add(1);
         let (circular, _, _, height) = self.panel_layout(window);
@@ -318,15 +327,9 @@ impl Overlay {
             }
         }
 
-        if self.presentation.live_mode
-            || !self
-                .model
-                .visible()
-                .is_some_and(|item| item.phase == Phase::Recording)
-        {
-            unsafe {
-                index_panel_audio(0., false);
-            }
+        let audio_recording = self.audio_feedback_recording().map_or(0, |item| item.id);
+        unsafe {
+            index_panel_audio_state(audio_recording);
         }
         let was_editing = self.editing;
         let editable = self
@@ -514,6 +517,9 @@ impl Overlay {
         self.update_panel(window, cx);
     }
     fn gesture(&mut self, event: &serde_json::Value, window: &mut Window, cx: &mut Context<Self>) {
+        if event["handled"] == "cancel_recognition" {
+            return;
+        }
         let Some(action) = event["gesture"]
             .as_str()
             .and_then(|name| self.gestures.action(name))
@@ -522,15 +528,20 @@ impl Overlay {
         };
         let target = unsafe { index_frontmost_pid() };
         match action {
+            settings::GestureAction::None => {}
             settings::GestureAction::History => {
                 self.model.open_history(target);
                 self.update_panel(window, cx);
             }
             settings::GestureAction::Paste => {
                 self.gesture_request += 1;
+                let now = chrono::Utc::now().timestamp_millis();
+                let gesture_at = event["emitted_at_ms"].as_i64();
                 if let Some(backend) = &mut self.backend
                     && let Err(error) = backend.send(serde_json::json!({"type":"paste_current",
-                        "request":self.gesture_request, "target":target}))
+                        "request":self.gesture_request, "target":target,
+                        "gesture_emitted_at_ms":gesture_at, "gui_sent_at_ms":now,
+                        "first_collection":event["first_collection"], "last_collection":event["last_collection"]}))
                 {
                     eprintln!("[GUI] Gesture paste failed: {error}");
                 }
@@ -915,10 +926,12 @@ fn main() -> anyhow::Result<()> {
                                 if event["type"] == "audio_level" {
                                     let age = event["emitted_at_ms"].as_i64().map_or(0, |time|
                                         chrono::Utc::now().timestamp_millis().saturating_sub(time).max(0));
-                                    let active = !this.presentation.live_mode && this.model.visible().is_some_and(|item|
-                                        item.phase == Phase::Recording && (item.recording.is_none() || item.recording.as_deref() == event["recording"].as_str()));
+                                    let recording = this.audio_feedback_recording().filter(|item|
+                                        item.recording.is_none() || item.recording.as_deref() == event["recording"].as_str()).map(|item| item.id);
+                                    let active = recording.is_some();
                                     if this.verbose { eprintln!("[GUI] Audio meter delivery_ms={age} active={active} stale={}", age > 500); }
-                                    if age <= 500 { unsafe { index_panel_audio(event["level"].as_f64().unwrap_or(0.), active); } }
+                                    if age <= 500 && let Some(recording) = recording {
+                                        unsafe { index_panel_audio_level(recording, event["level"].as_f64().unwrap_or(0.)); } }
                                 }
                                 if event["type"] == "paste_result" {
                                     this.pasting = false;

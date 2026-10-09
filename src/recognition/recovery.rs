@@ -220,6 +220,15 @@ impl Speech {
             };
             match result {
                 Ok(()) => return Ok(()),
+                Err(error) if error.downcast_ref::<UserCancelled>().is_some() => {
+                    match self.cancel_current(&input).await {
+                        Ok(()) => {}
+                        Err(error) if error.downcast_ref::<EngineFault>().is_some() => {
+                            self.recover(&error).await;
+                        }
+                        Err(error) => return Err(error),
+                    }
+                }
                 Err(error) if error.downcast_ref::<EngineFault>().is_some() => {
                     // Final may already have been emitted before a permit-release
                     // failure. Commit exactly once instead of replaying that job.
@@ -320,13 +329,50 @@ impl Speech {
 
     fn journal_permitted(&self) -> bool {
         self.recovery.journal.as_ref().is_some_and(|journal| {
-            self.mode != "live"
-                || self
-                    .lifecycle
-                    .lock()
-                    .unwrap()
-                    .permits(&journal.part.key, journal.generation)
+            let life = self.lifecycle.lock().unwrap();
+            !life.cancellation.is_cancelled(&journal.part.key)
+                && (self.mode != "live" || life.permits(&journal.part.key, journal.generation))
         })
+    }
+    fn acknowledge_batch(
+        &self,
+        part: &Part,
+        input: &Arc<Mutex<Box<dyn InputAdapter>>>,
+    ) -> Result<()> {
+        let mut adapter = input.lock().unwrap();
+        if let Some(checkpoint) = &part.checkpoint {
+            adapter.commit(checkpoint)?;
+        }
+        // Completion includes explicit cancellation, so receive-owned PCM can
+        // be released once all collections are present. It never fabricates text.
+        let mut life = self.lifecycle.lock().unwrap();
+        life.cancellation.finish(&part.key);
+        life.finished.insert(part.key.clone());
+        life.retire(&part.key);
+        adapter.completed(&part.key);
+        Ok(())
+    }
+    async fn cancel_current(&mut self, input: &Arc<Mutex<Box<dyn InputAdapter>>>) -> Result<()> {
+        self.output.debug(format!(
+            "[{}] cancelling recognition recording={:?}",
+            self.mode, self.key
+        ));
+        // A worker that cannot acknowledge cancel promptly is replaced; the
+        // cancelled journal is never replayed after recovery.
+        tokio::time::timeout(Duration::from_secs(2), self.cancel())
+            .await
+            .context("Speech cancellation acknowledgement timed out")
+            .context(EngineFault)??;
+        if self.mode == "batch"
+            && let Some(journal) = &self.recovery.journal
+        {
+            self.acknowledge_batch(&journal.part, input)?;
+        }
+        self.recovery.journal = None;
+        self.recovery.pending = None;
+        self.recovery.prepared = false;
+        self.recovery.replay = false;
+        Ok(())
     }
     fn finish_audio(&mut self, input: &Arc<Mutex<Box<dyn InputAdapter>>>) -> Result<()> {
         if self.mode == "batch" {
@@ -339,20 +385,7 @@ impl Speech {
                 journal.final_received,
                 "Batch ended without a final result; PCM remains retained"
             );
-            let key = journal.part.key.clone();
-            {
-                let mut adapter = input.lock().unwrap();
-                if let Some(checkpoint) = &journal.part.checkpoint {
-                    adapter.commit(checkpoint)?;
-                }
-                // Publish completion before the input task can consume its ACK.
-                // Otherwise that task can retire a visible source as cancelled
-                // between final text and this lifecycle update on another CPU.
-                let mut life = self.lifecycle.lock().unwrap();
-                life.finished.insert(key.clone());
-                life.retire(&key);
-                adapter.completed(&key);
-            }
+            self.acknowledge_batch(&journal.part, input)?;
             self.recovery.journal = None;
         } else if !self.journal_permitted() {
             self.recovery.journal = None;
@@ -390,6 +423,11 @@ impl Speech {
                     self.finish_audio(input)?;
                 }
             } else {
+                if self.mode == "batch"
+                    && let Some(journal) = &self.recovery.journal
+                {
+                    self.acknowledge_batch(&journal.part, input)?;
+                }
                 self.recovery.journal = None;
                 // A release/reset can invalidate a job while the model loads.
                 if self.recovery.prepared {
@@ -419,6 +457,20 @@ impl Speech {
                         }
                         _ => unreachable!(),
                     };
+                    if self
+                        .lifecycle
+                        .lock()
+                        .unwrap()
+                        .cancellation
+                        .is_cancelled(&part.key)
+                    {
+                        if self.mode == "batch" {
+                            self.acknowledge_batch(&part, input)?;
+                        }
+                        self.recovery.pending = None;
+                        self.recovery.prepared = false;
+                        continue;
+                    }
                     if self.mode == "live"
                         && !self
                             .lifecycle

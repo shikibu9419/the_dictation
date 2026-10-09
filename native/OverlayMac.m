@@ -41,7 +41,54 @@ static NSVisualEffectView *glass;
 static CALayer *neon, *halo;
 static CAGradientLayer *rim, *bloom;
 static NSTimer *audioTimer;
-static double audioTarget, audioEnvelope, audioUpdated;
+// Zero means the model is not displaying a recording. Chunk delivery cannot
+// enter this state; only the model's presentation-state update can do that.
+static uint64_t audioRecording;
+static double audioTarget, audioEnvelope, audioFrom, audioTransitionStarted;
+static double audioPulseTarget, audioPulseFrom, audioPulseTransitionStarted;
+static double audioMotionFrom, audioMotionTarget, audioMotionStarted, audioMotionDuration;
+static BOOL audioMotionExpanding;
+static const double audioTransitionDuration = 0.06;
+static const double audioPulseTransitionDuration = 0.12;
+// Display-only hysteresis on the normalized -55..-12 dBFS meter. This does not
+// classify speech or affect recording/ASR. Avoid flutter near the noise floor.
+static const double audioPulseOnLevel = 0.35, audioPulseOffLevel = 0.25;
+static double interpolatedAudioValue(double from, double target, double started, double duration, double now) {
+    double progress = fmax(0, fmin(1, (now - started) / duration));
+    double eased = 1 - (1 - progress) * (1 - progress);
+    return from + (target - from) * eased;
+}
+static double interpolatedAudioGlow(double now) {
+    return interpolatedAudioValue(audioFrom, audioTarget, audioTransitionStarted, audioTransitionDuration, now);
+}
+static double interpolatedAudioPulse(double now) {
+    return interpolatedAudioValue(audioPulseFrom, audioPulseTarget, audioPulseTransitionStarted, audioPulseTransitionDuration, now);
+}
+static double audioRandomRange(double low, double high) {
+    return low + (high - low) * ((double)arc4random_uniform(1000000) / 999999.0);
+}
+static void beginAudioMotion(double now) {
+    audioMotionFrom = 1;
+    audioMotionTarget = audioRandomRange(0.22, 0.48);
+    audioMotionStarted = now;
+    audioMotionDuration = audioRandomRange(0.20, 0.45);
+    audioMotionExpanding = NO;
+}
+static double audioMotion(double now) {
+    if (audioMotionDuration <= 0) return 1;
+    if (now >= audioMotionStarted + audioMotionDuration) {
+        audioMotionFrom = audioMotionTarget;
+        audioMotionExpanding = !audioMotionExpanding;
+        audioMotionTarget = audioMotionExpanding ? audioRandomRange(0.78, 1) : audioRandomRange(0.22, 0.48);
+        // Pick once per turn, not per frame or incoming chunk. Resume from the
+        // preceding endpoint after a stalled frame rather than jumping ahead.
+        audioMotionStarted = now;
+        audioMotionDuration = audioRandomRange(0.20, 0.45);
+    }
+    double progress = fmax(0, fmin(1, (now - audioMotionStarted) / audioMotionDuration));
+    double eased = progress * progress * (3 - 2 * progress);
+    return audioMotionFrom + (audioMotionTarget - audioMotionFrom) * eased;
+}
 static void applyAudioGlow(double level) {
     [CATransaction begin];
     [CATransaction setDisableActions:YES];
@@ -52,29 +99,69 @@ static void applyAudioGlow(double level) {
     bloom.opacity = 0.8 + 0.2 * level;
     [CATransaction commit];
 }
-void index_panel_audio(double level, bool active) {
-    dispatch_async(dispatch_get_main_queue(), ^{
-        if (!active) {
-            [audioTimer invalidate]; audioTimer = nil;
-            audioTarget = audioEnvelope = 0;
-            applyAudioGlow(0);
-            return;
-        }
-        audioTarget = isfinite(level) ? fmax(0, fmin(1, level)) : 0;
-        audioUpdated = CACurrentMediaTime();
-        // React in this main-queue turn. Waiting for the next timer tick and
-        // averaging the attack again added visible lag to every BLE update.
+static BOOL renderAudioGlow(double now) {
+    if (!audioRecording) return NO;
+    if (NSWorkspace.sharedWorkspace.accessibilityDisplayShouldReduceMotion) {
         audioEnvelope = audioTarget;
+        audioPulseTarget = audioPulseFrom = 0;
         applyAudioGlow(audioEnvelope);
-        if (audioTimer) return;
-        audioTimer = [NSTimer timerWithTimeInterval:1.0 / 60 repeats:YES block:^(NSTimer *timer) {
-            double age = CACurrentMediaTime() - audioUpdated;
-            // Decay only when no fresh level is available, with no second
-            // low-pass filter that keeps old speech glowing after it ended.
-            audioEnvelope = audioTarget * exp(-fmax(0, age - 0.10) / 0.12);
-            applyAudioGlow(audioEnvelope);
-        }];
-        [[NSRunLoop mainRunLoop] addTimer:audioTimer forMode:NSRunLoopCommonModes];
+        return NO;
+    }
+    audioEnvelope = interpolatedAudioGlow(now);
+    double pulse = interpolatedAudioPulse(now);
+    double motion = pulse > 0 ? audioMotion(now) : 1;
+    applyAudioGlow(audioEnvelope * (1 - pulse * (1 - motion)));
+    return pulse > 0 || audioPulseTarget > 0 || now - audioTransitionStarted < audioTransitionDuration;
+}
+static void resetAudioGlow(void) {
+    [audioTimer invalidate]; audioTimer = nil;
+    audioTarget = audioEnvelope = audioFrom = audioTransitionStarted = 0;
+    audioPulseTarget = audioPulseFrom = audioPulseTransitionStarted = 0;
+    audioMotionFrom = audioMotionTarget = audioMotionStarted = audioMotionDuration = 0;
+    audioMotionExpanding = NO;
+    applyAudioGlow(0);
+}
+static void reconcileAudioGlow(double now) {
+    if (!audioRecording) { resetAudioGlow(); return; }
+    double pulseTarget = audioPulseTarget > 0 ? audioTarget > audioPulseOffLevel : audioTarget >= audioPulseOnLevel;
+    if (pulseTarget != audioPulseTarget) {
+        audioPulseFrom = interpolatedAudioPulse(now);
+        if (pulseTarget > 0 && audioPulseFrom == 0) beginAudioMotion(now);
+        audioPulseTarget = pulseTarget;
+        audioPulseTransitionStarted = now;
+    }
+    if (!renderAudioGlow(now)) {
+        [audioTimer invalidate]; audioTimer = nil;
+        return;
+    }
+    if (audioTimer) return;
+    audioTimer = [NSTimer timerWithTimeInterval:1.0 / 60 repeats:YES block:^(NSTimer *timer) {
+        if (!renderAudioGlow(CACurrentMediaTime())) {
+            [timer invalidate]; audioTimer = nil;
+        }
+    }];
+    [[NSRunLoop mainRunLoop] addTimer:audioTimer forMode:NSRunLoopCommonModes];
+}
+void index_panel_audio_state(uint64_t recording) {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        if (audioRecording == recording) return;
+        audioRecording = recording;
+        // A new recording must not inherit the preceding recording's level.
+        resetAudioGlow();
+        reconcileAudioGlow(CACurrentMediaTime());
+    });
+}
+void index_panel_audio_level(uint64_t recording, double level) {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        if (!audioRecording || audioRecording != recording) return;
+        double target = isfinite(level) ? fmax(0, fmin(1, level)) : 0;
+        double now = CACurrentMediaTime();
+        if (target != audioTarget) {
+            audioFrom = interpolatedAudioGlow(now);
+            audioTarget = target;
+            audioTransitionStarted = now;
+        }
+        reconcileAudioGlow(now);
     });
 }
 
@@ -264,7 +351,7 @@ void index_panel_editing(bool editing) {
         else [[gpuiView inputContext] deactivate];
     });
 }
-void index_panel_hide(void) { index_panel_audio(0, false); dispatch_async(dispatch_get_main_queue(), ^{
+void index_panel_hide(void) { index_panel_audio_state(0); dispatch_async(dispatch_get_main_queue(), ^{
     [[gpuiView inputContext] deactivate];
     [panel orderOut:nil];
     NSLog(@"[Index panel] hidden visible=%d", panel.isVisible);

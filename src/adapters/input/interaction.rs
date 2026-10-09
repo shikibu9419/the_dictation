@@ -7,7 +7,7 @@ use super::{
 use crate::{
     output::Output,
     recordings::{Checkpoint, Recordings},
-    settings::Settings,
+    settings::{GestureAction, Settings},
 };
 use anyhow::{Context, Result, ensure};
 use pebble_index::reception::{
@@ -32,8 +32,14 @@ impl Interaction {
     pub fn new(settings: &Settings) -> Result<Self> {
         let mut hooks = Hooks::default();
         hooks.register(LogHook);
+        let mut reception = settings.reception;
+        if settings.gestures.double_tap == GestureAction::None {
+            // Translate the binding into detection policy here. The reducer
+            // owns timing, and does not need to know which UI action is bound.
+            reception.tap_sequence_grace_ms = 0;
+        }
         Ok(Self {
-            machine: SessionState::new(settings.reception)?,
+            machine: SessionState::new(reception)?,
             effects: InputEffects::default(),
             hooks,
             namespace: format!("ring-{}", uuid::Uuid::new_v4()),
@@ -117,13 +123,17 @@ impl Interaction {
                             _ => None,
                         };
                         if let Some(gesture) = gesture {
+                            let cancel_recording = event.cancel_session.map(|id| self.key(id));
                             let event = GestureEvent {
                                 gesture,
                                 first_collection: Some(event.first_collection as u16),
                                 last_collection: Some(event.last_collection as u16),
                             };
                             self.hooks.dispatch(event, output);
-                            result.push(InputEvent::Gesture(event));
+                            result.push(InputEvent::Gesture {
+                                event,
+                                cancel_recording,
+                            });
                         }
                     }
                     Action::Ambiguous { .. } => {}

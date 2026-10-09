@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 pub struct Reception {
     pub hold_ui_delay_ms: u64,
     pub long_resume_grace_ms: u64,
+    /// Zero disables tap grouping and emits each completed short immediately.
     pub tap_sequence_grace_ms: u64,
     pub live_chunk_ms: u64,
     pub state_poll_interval_ms: u64,

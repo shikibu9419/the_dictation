@@ -16,9 +16,18 @@ pub async fn run(output: Output) -> Result<()> {
         tokio::select! {
             line = lines.next_line() => {
                 let Some(line) = line? else { helper.close().await; return Ok(()) };
-                let message: Value = serde_json::from_str(&line).context("Invalid UI command")?;
+                let mut message: Value = serde_json::from_str(&line).context("Invalid UI command")?;
                 match message["type"].as_str() {
-                    Some("paste" | "paste_current" | "copy" | "capture_target" | "forget_target" | "permission") => helper.send(&message).await?,
+                    Some("paste" | "paste_current" | "copy" | "capture_target" | "forget_target" | "permission") => {
+                        if matches!(message["type"].as_str(), Some("paste" | "paste_current")) {
+                            let now = chrono::Utc::now().timestamp_millis();
+                            let elapsed = |field: &str| message[field].as_i64().map(|sent| now.saturating_sub(sent).max(0));
+                            output.debug(format!("Paste command request={} collections={}..{} gesture_to_backend_ms={:?} gui_to_backend_ms={:?}",
+                                message["request"], message["first_collection"], message["last_collection"], elapsed("gesture_emitted_at_ms"), elapsed("gui_sent_at_ms")));
+                            message["backend_sent_at_ms"] = json!(now);
+                        }
+                        helper.send(&message).await?;
+                    }
                     _ => output.debug("Ignoring unknown UI command"),
                 }
             }

@@ -18,7 +18,10 @@ pub struct AudioChunk {
     pub checkpoint: Option<Value>,
 }
 pub enum InputEvent {
-    Gesture(gesture_types::GestureEvent),
+    Gesture {
+        event: gesture_types::GestureEvent,
+        cancel_recording: Option<String>,
+    },
     Audio(AudioChunk),
     State(bool),
     Reception {

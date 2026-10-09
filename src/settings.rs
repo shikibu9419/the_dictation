@@ -37,6 +37,7 @@ pub enum GestureAction {
     #[default]
     History,
     Paste,
+    None,
 }
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(default, deny_unknown_fields)]

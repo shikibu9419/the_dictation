@@ -401,7 +401,7 @@ impl Render for SettingsView {
                                     .child(
                                         choice(
                                             "double_tap-paste",
-                                            "現在の入力先へペースト",
+                                            "ペースト",
                                             self.settings.gestures.double_tap
                                                 == GestureAction::Paste,
                                         )
@@ -412,7 +412,28 @@ impl Render for SettingsView {
                                                 cx.notify();
                                             }),
                                         ),
+                                    )
+                                    .child(
+                                        choice(
+                                            "double_tap-none",
+                                            "操作なし",
+                                            self.settings.gestures.double_tap
+                                                == GestureAction::None,
+                                        )
+                                        .on_click(
+                                            cx.listener(|this, _, _, cx| {
+                                                this.settings.gestures.double_tap =
+                                                    GestureAction::None;
+                                                cx.notify();
+                                            }),
+                                        ),
                                     ),
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(12.))
+                                    .text_color(rgb(0xa2a2a2))
+                                    .child("「操作なし」ではダブルタップを待たず、各タップでシングルの操作を実行します。"),
                             ),
                     )
                     .when(

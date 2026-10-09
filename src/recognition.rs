@@ -19,7 +19,9 @@ use std::{
     time::{Duration, Instant},
 };
 use tokio::{io::BufReader, process::Command, sync::oneshot, task::JoinSet};
+mod cancellation;
 mod recovery;
+use cancellation::{Cancellation, UserCancelled};
 use recovery::{EngineFault, Recovery, start_engine};
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -43,6 +45,7 @@ struct ReceptionControl {
 }
 #[derive(Default)]
 struct Lifecycle {
+    cancellation: Cancellation,
     collecting: Option<bool>,
     released: HashSet<String>,
     finished: HashSet<String>,
@@ -51,20 +54,22 @@ struct Lifecycle {
 }
 impl Lifecycle {
     fn suppressed(&self, key: &str) -> bool {
-        self.reception.get(key).map_or(
-            self.collecting == Some(false) || self.released.contains(key),
-            |s| !s.live,
-        )
+        self.cancellation.is_cancelled(key)
+            || self.reception.get(key).map_or(
+                self.collecting == Some(false) || self.released.contains(key),
+                |s| !s.live,
+            )
     }
     fn permits(&self, key: &str, generation: Option<u64>) -> bool {
-        generation.map_or_else(
-            || !self.suppressed(key),
-            |generation| {
-                self.reception
-                    .get(key)
-                    .is_some_and(|s| s.live && s.generation == generation)
-            },
-        )
+        !self.cancellation.is_cancelled(key)
+            && generation.map_or_else(
+                || !self.suppressed(key),
+                |generation| {
+                    self.reception
+                        .get(key)
+                        .is_some_and(|s| s.live && s.generation == generation)
+                },
+            )
     }
     fn visible(&self, key: &str, generation: Option<u64>) -> bool {
         self.permits(key, generation)
@@ -180,18 +185,20 @@ impl Speech {
                 self.recovery.final_received();
             }
             let text = event["text"].as_str().unwrap_or("");
-            let suppressed = self.mode == "live"
-                && (!self
-                    .lifecycle
-                    .lock()
-                    .unwrap()
-                    .visible(self.key.as_deref().unwrap_or(""), self.generation)
-                    || kind == "partial"
-                        && !self.recovery.partial_visible(
-                            self.key.as_deref().unwrap_or(""),
-                            self.generation,
-                            event["consumed_samples"].as_u64(),
-                        ));
+            // Serialize final publication with gesture cancellation. A result
+            // is either completed before the tap, or suppressed after it.
+            let lifecycle = self.lifecycle.clone();
+            let mut life = lifecycle.lock().unwrap();
+            let key = self.key.as_deref().unwrap_or("");
+            let suppressed = life.cancellation.is_cancelled(key)
+                || self.mode == "live"
+                    && (!life.visible(key, self.generation)
+                        || kind == "partial"
+                            && !self.recovery.partial_visible(
+                                self.key.as_deref().unwrap_or(""),
+                                self.generation,
+                                event["consumed_samples"].as_u64(),
+                            ));
             if !suppressed && !text.is_empty() && !self.first_result {
                 if let Some(start) = self.first_input {
                     self.output.debug(format!(
@@ -212,6 +219,9 @@ impl Speech {
                 self.mode, self.key
             ));
             if !suppressed {
+                if self.mode == "batch" && kind == "final" {
+                    life.cancellation.finish(key);
+                }
                 let mut result = json!({"type":"text","text":text,"final":kind=="final","recording":self.key,"mode":self.mode});
                 if kind == "final" {
                     result["segments"] = json!(self.segments);
@@ -224,6 +234,17 @@ impl Speech {
             }
         }
         Ok(())
+    }
+    async fn next_event(&mut self, cancellable: bool) -> Result<EngineReply> {
+        let lifecycle = self.lifecycle.clone();
+        let key = self.key.clone();
+        tokio::select! {
+            biased;
+            _ = Cancellation::wait(lifecycle, key.clone().unwrap_or_default()), if cancellable && key.is_some() => {
+                Err(UserCancelled.into())
+            }
+            event = self.engine.event() => event.context(EngineFault),
+        }
     }
     async fn command(&mut self, message: EngineCommand, ack: &str) -> Result<()> {
         let kind = match &message {
@@ -246,9 +267,11 @@ impl Speech {
             .flatten()
             .map(|control| control.activity());
         active_timeout(timeout, activity, async {
+            // Complete the JSON write before observing cancellation. Dropping
+            // write_all halfway through a PCM command would corrupt the pipe.
             self.engine.send(message).await?;
             loop {
-                let event = self.engine.event().await?;
+                let event = self.next_event(kind != "cancel").await?;
                 let accepted = event.kind() == ack;
                 self.event(event)?;
                 if accepted {
@@ -300,6 +323,15 @@ impl Speech {
         let pcm = part.samples;
         self.samples += pcm.len();
         for block in pcm.chunks((part.rate / 2).max(1) as usize) {
+            if self
+                .lifecycle
+                .lock()
+                .unwrap()
+                .cancellation
+                .is_cancelled(&part.key)
+            {
+                return Err(UserCancelled.into());
+            }
             if self.mode == "live"
                 && !self
                     .lifecycle
@@ -312,9 +344,10 @@ impl Speech {
             }
             while self.engine.input_backlogged() {
                 let activity = self.engine.control().map(|c| c.activity());
-                let event = active_timeout(Duration::from_secs(120), activity, self.engine.event())
-                    .await
-                    .context(EngineFault)?;
+                let event =
+                    active_timeout(Duration::from_secs(120), activity, self.next_event(true))
+                        .await
+                        .context(EngineFault)?;
                 self.event(event)?;
             }
             if self.first_input.is_none() {
@@ -373,9 +406,22 @@ impl Recognition {
                 emit(json!({"type":"reception_state", "namespace":namespace, "state":snapshot}))
             }
             Effect::View(view) => {
+                // The same transition carries a targeted cancellation gesture.
+                // Keep its pending job registered until that intent is applied.
+                if view.cancelled {
+                    return Ok(());
+                }
                 let key = key(view.id);
                 let was_visible = {
                     let mut life = self.lifecycle.lock().unwrap();
+                    if life.cancellation.is_cancelled(&key) {
+                        return Ok(());
+                    }
+                    if view.visible && !view.failed {
+                        life.cancellation.begin(&key);
+                    } else {
+                        life.cancellation.finish(&key);
+                    }
                     let control = life.reception.entry(key.clone()).or_default();
                     let previous = control.visible;
                     control.visible = view.visible;
@@ -423,6 +469,15 @@ impl Recognition {
             }
             Effect::Live(plan) => {
                 let key = key(plan.session);
+                if self
+                    .lifecycle
+                    .lock()
+                    .unwrap()
+                    .cancellation
+                    .is_cancelled(&key)
+                {
+                    return Ok(());
+                }
                 self.lifecycle
                     .lock()
                     .unwrap()
@@ -454,7 +509,15 @@ impl Recognition {
                 let key = key(plan.session);
                 // A complete recording can arrive without a preceding S=true.
                 // Create its result item directly in dictating, never recording.
-                emit(json!({"type":"reception_activity", "recording":key,"collecting":false}));
+                {
+                    let mut life = self.lifecycle.lock().unwrap();
+                    life.cancellation.begin(&key);
+                    if !life.cancellation.is_cancelled(&key) {
+                        emit(
+                            json!({"type":"reception_activity", "recording":key,"collecting":false}),
+                        );
+                    }
+                }
                 self.output.debug(format!(
                     "whole PCM recording={key} samples={} duration={:.3}s",
                     plan.pcm.len(),
@@ -473,7 +536,9 @@ impl Recognition {
             }
             Effect::Action(Action::MergeSession { from, into }) => {
                 let from = key(from);
-                self.lifecycle.lock().unwrap().reception.remove(&from);
+                let mut life = self.lifecycle.lock().unwrap();
+                life.cancellation.finish(&from);
+                life.reception.remove(&from);
                 emit(
                     json!({"type":"reception_merge","recording":from,"target_recording":key(into)}),
                 );
@@ -493,6 +558,7 @@ impl Recognition {
                 life.released.remove(&key);
                 life.finished.remove(&key);
                 life.closed.remove(&key);
+                life.cancellation.retire(&key);
             }
             Effect::Action(_) => {}
         }
@@ -538,6 +604,7 @@ impl Recognition {
     }
     fn add(&mut self, part: Part) -> Result<()> {
         let key = part.key.clone();
+        self.lifecycle.lock().unwrap().cancellation.begin(&key);
         let held_samples: usize = self.audio.values().map(|(pcm, _)| pcm.len()).sum();
         let held_blocks: usize = self.audio.values().map(|(pcm, _)| pcm.block_count()).sum();
         ensure!(
@@ -611,25 +678,54 @@ impl Recognition {
         self.release(key)?;
         self.audio.remove(key);
         let mut life = self.lifecycle.lock().unwrap();
+        life.cancellation.finish(key);
         life.finished.insert(key.into());
         life.retire(key);
         Ok(())
     }
     fn apply_event(&mut self, event: InputEvent) -> Result<()> {
         match event {
-            InputEvent::Gesture(event) => emit(json!({"type":"gesture", "gesture":event.gesture,
-                "first_collection":event.first_collection, "last_collection":event.last_collection})),
+            InputEvent::Gesture {
+                event,
+                cancel_recording,
+            } => {
+                let cancelled = if let Some(key) = &cancel_recording {
+                    let mut life = self.lifecycle.lock().unwrap();
+                    let cancelled = life.cancellation.cancel(key);
+                    if cancelled {
+                        emit(json!({"type":"cancelled", "recording":key}));
+                    }
+                    cancelled
+                } else {
+                    false
+                };
+                if let Some(key) = &cancel_recording {
+                    self.output.debug(format!(
+                        "Single tap cancellation recording={key} accepted={cancelled}; collections={:?}..{:?}; double_tap_wait=skipped",
+                        event.first_collection, event.last_collection
+                    ));
+                    if cancelled {
+                        self.release(key)?;
+                    }
+                }
+                // A result may win the race after the input selected its target.
+                // Still consume the tap; never paste or cancel a newer recording.
+                emit(json!({"type":"gesture", "gesture":event.gesture,
+                    "handled":cancel_recording.as_ref().map(|_| "cancel_recognition"),
+                    "recording":cancel_recording,
+                    "emitted_at_ms":chrono::Utc::now().timestamp_millis(),
+                    "first_collection":event.first_collection, "last_collection":event.last_collection}));
+            }
             InputEvent::Checkpoint(value) => self.batch.send(Job::Checkpoint(value))?,
             InputEvent::Audio(part) => self.add(part)?,
             InputEvent::Reception { namespace, effect } => self.reception(&namespace, effect)?,
             InputEvent::Level { key, level } => {
-                if self
-                    .lifecycle
-                    .lock()
-                    .unwrap()
-                    .reception
-                    .get(&key)
-                    .is_some_and(|s| s.visible && s.live)
+                let life = self.lifecycle.lock().unwrap();
+                if !life.cancellation.is_cancelled(&key)
+                    && life
+                        .reception
+                        .get(&key)
+                        .is_some_and(|s| s.visible && s.live)
                 {
                     emit(json!({"type":"audio_level", "recording":key, "level":level,
                         "emitted_at_ms":chrono::Utc::now().timestamp_millis()}));

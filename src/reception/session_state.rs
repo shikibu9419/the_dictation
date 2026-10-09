@@ -40,6 +40,9 @@ pub struct CompletedGesture {
     pub gesture: Gesture,
     pub first_collection: u64,
     pub last_collection: u64,
+    /// Consume this short before ordinary tap aggregation. The target is bound
+    /// to the preceding recording, never whichever job runs when it executes.
+    pub cancel_session: Option<SessionId>,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct Snapshot {
@@ -132,6 +135,7 @@ pub struct SessionView {
     pub live: bool,
     pub dictating: bool,
     pub failed: bool,
+    pub cancelled: bool,
     pub policy: Reception,
 }
 #[derive(Clone, Debug)]
@@ -179,6 +183,7 @@ struct Session {
     shown: bool,
     submitted: bool,
     failed: bool,
+    cancelled: bool,
     prefix: Option<Tap>,
     resume: Option<Resume>,
 }
@@ -463,6 +468,7 @@ impl SessionState {
                 shown: false,
                 submitted: false,
                 failed: false,
+                cancelled: false,
                 prefix: None,
                 resume: None,
             },
@@ -494,7 +500,7 @@ impl SessionState {
         let parent = self
             .active
             .and_then(|id| self.sessions.get(&id))
-            .filter(|s| !s.submitted && !s.failed && s.release_at.is_some())
+            .filter(|s| !s.submitted && !s.failed && !s.cancelled && s.release_at.is_some())
             .map(|s| Resume {
                 parent: s.id,
                 within_grace: s.deadline().is_some_and(|d| now <= d),
@@ -664,13 +670,21 @@ impl SessionState {
             into: parent,
         });
     }
-    fn emit_gesture(&mut self, gesture: Gesture, first: u64, last: u64, actions: &mut Vec<Action>) {
+    fn emit_gesture(
+        &mut self,
+        gesture: Gesture,
+        first: u64,
+        last: u64,
+        cancel_session: Option<SessionId>,
+        actions: &mut Vec<Action>,
+    ) {
         self.next_gesture += 1;
         let event = CompletedGesture {
             id: self.next_gesture,
             gesture,
             first_collection: first,
             last_collection: last,
+            cancel_session,
         };
         self.last_gesture = Some(event.clone());
         actions.push(Action::Gesture(event));
@@ -696,6 +710,32 @@ impl SessionState {
     }
     fn tap(&mut self, id: SessionId, now: u64, actions: &mut Vec<Action>) {
         let (first, last) = self.interval(id);
+        let cancel_session = self
+            .sessions
+            .values()
+            .filter(|s| {
+                s.id != id
+                    && !s.collecting
+                    && !s.failed
+                    && !s.cancelled
+                    && (s.submitted || s.shown)
+                    && !s.sources.is_empty()
+                    && self.classification(s.id) != Some(Press::Short)
+                    && self.interval(s.id).1 < first
+            })
+            .max_by_key(|s| self.interval(s.id).1)
+            .map(|s| s.id);
+        if let Some(target) = cancel_session {
+            // Cancellation is a state transition, not a delayed SinglePush
+            // binding. Do not lend this press to a pending or future double.
+            self.pending_tap = None;
+            let session = self.sessions.get_mut(&target).unwrap();
+            session.cancelled = true;
+            session.ui_deadline = None;
+            self.retire(id, actions);
+            self.emit_gesture(Gesture::SinglePush, first, last, Some(target), actions);
+            return;
+        }
         let session = self.sessions.get_mut(&id).unwrap();
         let grace = session.policy.tap_sequence_grace_ms;
         let prefix = session.prefix.take().or_else(|| {
@@ -710,13 +750,23 @@ impl SessionState {
             .find(|s| s.resume.is_some_and(|r| r.parent == id && r.within_grace))
             .map(|s| s.id);
         self.retire(id, actions);
-        if let Some(prefix) = prefix {
+        if grace == 0 {
+            // Bypass both the timer and the receive-watermark fence. Already
+            // buffered later presses must not delay or absorb this single tap.
+            // Preserve an older prefix if policy changed between candidates.
+            let preceding = prefix.or_else(|| self.pending_tap.take());
             self.pending_tap = None;
-            self.emit_gesture(Gesture::DoublePush, prefix.first, last, actions);
+            if let Some(old) = preceding {
+                self.emit_gesture(Gesture::SinglePush, old.first, old.last, None, actions);
+            }
+            self.emit_gesture(Gesture::SinglePush, first, last, None, actions);
+        } else if let Some(prefix) = prefix {
+            self.pending_tap = None;
+            self.emit_gesture(Gesture::DoublePush, prefix.first, last, None, actions);
         } else {
             // A different completed tap must not silently replace an older one.
             if let Some(old) = self.pending_tap.take() {
-                self.emit_gesture(Gesture::SinglePush, old.first, old.last, actions);
+                self.emit_gesture(Gesture::SinglePush, old.first, old.last, None, actions);
             }
             let tap = Tap {
                 first,
@@ -745,7 +795,7 @@ impl SessionState {
         for session in self.sessions.values_mut() {
             if session.ui_deadline.is_some_and(due) {
                 session.ui_deadline = None;
-                if session.collecting && !session.failed {
+                if session.collecting && !session.failed && !session.cancelled {
                     session.shown = true;
                 }
             }
@@ -765,7 +815,7 @@ impl SessionState {
             }
             if !tap.waiting_for_range && tap.watermark.is_none_or(|end| self.processed_end >= end) {
                 let tap = self.pending_tap.take().unwrap();
-                self.emit_gesture(Gesture::SinglePush, tap.first, tap.last, actions);
+                self.emit_gesture(Gesture::SinglePush, tap.first, tap.last, None, actions);
             }
         }
     }
@@ -846,6 +896,7 @@ impl SessionState {
                         },
                         prefix.map_or(first, |t| t.first),
                         last,
+                        None,
                         actions,
                     );
                 } else {
@@ -856,7 +907,13 @@ impl SessionState {
                         });
                     }
                     if let Some(prefix) = prefix {
-                        self.emit_gesture(Gesture::SinglePush, prefix.first, prefix.last, actions);
+                        self.emit_gesture(
+                            Gesture::SinglePush,
+                            prefix.first,
+                            prefix.last,
+                            None,
+                            actions,
+                        );
                     }
                 }
                 let session = self.sessions.get_mut(&id).unwrap();
@@ -878,6 +935,7 @@ impl SessionState {
             let short = self.classification(session.id) == Some(Press::Short);
             let live = !session.submitted
                 && !session.failed
+                && !session.cancelled
                 && !short
                 && (session.collecting || session.deadline().is_some_and(|d| self.now < d));
             sessions.insert(
@@ -886,11 +944,12 @@ impl SessionState {
                     id: session.id,
                     generation: session.generation,
                     sources: session.sources.clone(),
-                    visible: session.shown && !short,
+                    visible: session.shown && !short && !session.cancelled,
                     collecting: session.collecting,
                     live,
-                    dictating: !session.collecting && !live && !short,
+                    dictating: !session.collecting && !live && !short && !session.cancelled,
                     failed: session.failed,
+                    cancelled: session.cancelled,
                     policy: session.policy,
                 },
             );
