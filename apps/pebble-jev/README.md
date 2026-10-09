@@ -50,6 +50,12 @@ cargo clippy -p pebble-jev --all-targets -- -D warnings
 # 文字起こし・add_todo の呼び出し・応答音声が届くことを確認します。
 set -a; source .env; set +a
 cargo test -p openai-realtime --test connect -- --ignored --nocapture --test-threads=1
+
+# リング実機なしの end-to-end。Bluetooth ヘルパーの代わりにスクリプトが長押し（S/R/C 応答）を再生し、
+# 押下中のライブ送信 → 離して commit → 文字起こし → add_todo 実行 → 応答まで本物の API で確認します。
+cargo test -p pebble-jev --test ring_end_to_end -- --ignored --nocapture
 ```
+
+`pebble-jev headless --verbose` はウィンドウを出さずに同じセッションを走らせ、UI イベントを JSON lines で stdout に出します（ログは stderr）。
 
 リング・Bluetooth・API 接続を伴う動作は実機で確認してください。`--verbose` で送受信ログを stderr に出します。

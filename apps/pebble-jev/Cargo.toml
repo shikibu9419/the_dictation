@@ -22,6 +22,9 @@ serde_json.workspace = true
 tempfile.workspace = true
 tokio.workspace = true
 
+[dev-dependencies]
+hound.workspace = true
+
 [[bin]]
 name = "pebble-jev"
 path = "src/main.rs"

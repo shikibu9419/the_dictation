@@ -29,6 +29,8 @@ enum Action {
         #[arg(long, default_value_t = 30.0)]
         timeout: f64,
     },
+    /// Run the ring and API session without a window, printing UI events as JSON lines.
+    Headless,
 }
 
 fn main() -> Result<()> {
@@ -42,8 +44,27 @@ fn main() -> Result<()> {
             let output = Output::new(cli.verbose, cli.log.as_deref())?;
             tokio::runtime::Runtime::new()?.block_on(pair(address, timeout, output))
         }
+        Some(Action::Headless) => tokio::runtime::Runtime::new()?.block_on(headless(cli.verbose)),
         None => view::run(cli.verbose, cli.log),
     }
+}
+
+async fn headless(verbose: bool) -> Result<()> {
+    use std::io::Write;
+    let (_stop_tx, stop) = tokio::sync::oneshot::channel();
+    let ui: session::UiSink = Box::new(|event| {
+        let mut stdout = std::io::stdout().lock();
+        let _ = serde_json::to_writer(&mut stdout, &event);
+        let _ = stdout.write_all(b"\n");
+        let _ = stdout.flush();
+    });
+    session::run(session::SessionOptions {
+        settings: settings::Settings::load()?,
+        verbose,
+        ui,
+        stop,
+    })
+    .await
 }
 
 async fn pair(address: Option<String>, timeout: f64, output: Output) -> Result<()> {

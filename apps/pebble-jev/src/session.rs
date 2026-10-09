@@ -16,7 +16,8 @@ use pebble_ring::{
 use std::{collections::HashMap, time::Duration};
 use tokio::sync::{mpsc, oneshot};
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Entry {
     User {
         id: String,
@@ -37,7 +38,8 @@ pub enum Entry {
     },
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize)]
+#[serde(tag = "type", content = "data", rename_all = "snake_case")]
 pub enum UiEvent {
     Status(String),
     Recording(u64),
@@ -200,7 +202,9 @@ pub async fn run(options: SessionOptions) -> Result<()> {
         ui,
         mut stop,
     } = options;
-    let output = Output::new(verbose, None)?;
+    let mut output = Output::new(verbose, None)?;
+    // Keep stdout for structured output; status lines go to stderr.
+    output.events = true;
     let api_key = settings.api_key()?;
     let _lock = config::BluetoothLock::acquire()?;
     let address =

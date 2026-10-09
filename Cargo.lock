@@ -4519,6 +4519,7 @@ dependencies = [
  "futures",
  "gpui",
  "gpui-component",
+ "hound",
  "openai-realtime",
  "pebble-core",
  "pebble-ring",
