@@ -1,3 +1,12 @@
+// Boundary tests deliberately use a 50 ms policy; production defaults are tested separately.
+fn short_window() -> SessionState {
+    SessionState::new(Reception {
+        tap_sequence_grace_ms: 50,
+        ..Reception::default()
+    })
+    .unwrap()
+}
+
 use super::session_state::*;
 use super::{button_detector::Press, config::Reception};
 
@@ -66,7 +75,7 @@ fn start_long(m: &mut SessionState) -> SessionId {
 
 #[test]
 fn counter_discontinuity_cannot_merge_holds_or_fire_an_old_pending_tap() {
-    let mut m = SessionState::default();
+    let mut m = short_window();
     audio(&mut m, 0, "tap", 1, Some(Press::Short), true);
     state(&mut m, 20, true, 2); // Accepted prefix, still no classified audio.
     let t = m
@@ -84,7 +93,7 @@ fn counter_discontinuity_cannot_merge_holds_or_fire_an_old_pending_tap() {
 
 #[test]
 fn discontinuity_keeps_submitted_and_complete_audio_but_fails_incomplete_audio() {
-    let mut m = SessionState::default();
+    let mut m = short_window();
     audio(&mut m, 0, "submitted", 1, Some(Press::Long), true);
     let submitted = batches(&m.tick(50).unwrap())[0].0;
     audio(&mut m, 51, "ready", 2, Some(Press::Long), true);
@@ -114,7 +123,7 @@ fn discontinuity_keeps_submitted_and_complete_audio_but_fails_incomplete_audio()
 
 #[test]
 fn losing_a_parent_detaches_its_provisional_child_before_new_audio_arrives() {
-    let mut m = SessionState::default();
+    let mut m = short_window();
     let parent = start_long(&mut m);
     state(&mut m, 100, false, 2);
     state(&mut m, 120, true, 2);
@@ -129,7 +138,7 @@ fn losing_a_parent_detaches_its_provisional_child_before_new_audio_arrives() {
 
 #[test]
 fn a_new_lost_source_emits_no_live_or_batch_even_with_short_metadata() {
-    let mut m = SessionState::default();
+    let mut m = short_window();
     state(&mut m, 0, true, 3); // First available C; the prefix is already gone.
     let t = m
         .observe(
@@ -162,7 +171,7 @@ fn a_new_lost_source_emits_no_live_or_batch_even_with_short_metadata() {
 
 #[test]
 fn thirty_ms_short_never_shows_or_recognizes_and_hook_fires_once() {
-    let mut m = SessionState::default();
+    let mut m = short_window();
     state(&mut m, 0, true, 1);
     state(&mut m, 30, false, 1);
     let t = audio(&mut m, 40, "a", 1, Some(Press::Short), true);
@@ -179,7 +188,7 @@ fn thirty_ms_short_never_shows_or_recognizes_and_hook_fires_once() {
 }
 #[test]
 fn repeated_true_does_not_extend_fifty_ms_display_delay() {
-    let mut m = SessionState::default();
+    let mut m = short_window();
     state(&mut m, 0, true, 1);
     state(&mut m, 25, true, 1);
     assert_eq!(m.tick(49).unwrap().snapshot.app_state, AppState::Idle);
@@ -187,7 +196,7 @@ fn repeated_true_does_not_extend_fifty_ms_display_delay() {
 }
 #[test]
 fn two_short_finals_fire_double_immediately_without_single() {
-    let mut m = SessionState::default();
+    let mut m = short_window();
     audio(&mut m, 0, "a", 1, Some(Press::Short), true);
     let t = audio(&mut m, 30, "b", 2, Some(Press::Short), true);
     assert_eq!(gestures(&t), [Gesture::DoublePush]);
@@ -196,7 +205,7 @@ fn two_short_finals_fire_double_immediately_without_single() {
 }
 #[test]
 fn second_true_within_tap_window_keeps_prefix_until_late_classification() {
-    let mut m = SessionState::default();
+    let mut m = short_window();
     audio(&mut m, 0, "a", 1, Some(Press::Short), true);
     assert_eq!(
         state(&mut m, 30, true, 2).snapshot.prefix,
@@ -209,7 +218,7 @@ fn second_true_within_tap_window_keeps_prefix_until_late_classification() {
 }
 #[test]
 fn single_then_hold_excludes_the_first_short_from_audio() {
-    let mut m = SessionState::default();
+    let mut m = short_window();
     audio(&mut m, 0, "a", 1, Some(Press::Short), true);
     state(&mut m, 30, true, 2);
     audio(&mut m, 60, "b", 2, Some(Press::Long), false);
@@ -221,7 +230,7 @@ fn single_then_hold_excludes_the_first_short_from_audio() {
 }
 #[test]
 fn false_jitter_with_same_source_keeps_the_live_session() {
-    let mut m = SessionState::default();
+    let mut m = short_window();
     let id = start_long(&mut m);
     state(&mut m, 100, false, 2);
     let t = state(&mut m, 130, true, 2);
@@ -235,7 +244,7 @@ fn false_jitter_with_same_source_keeps_the_live_session() {
 }
 #[test]
 fn final_then_new_long_within_grace_joins_sources_without_changing_final_markers() {
-    let mut m = SessionState::default();
+    let mut m = short_window();
     let id = start_long(&mut m);
     audio(&mut m, 100, "a", 1, Some(Press::Long), true);
     state(&mut m, 130, true, 2);
@@ -249,7 +258,7 @@ fn final_then_new_long_within_grace_joins_sources_without_changing_final_markers
 }
 #[test]
 fn resumed_short_is_removed_from_long_audio_and_has_its_own_tap_hook() {
-    let mut m = SessionState::default();
+    let mut m = short_window();
     let id = start_long(&mut m);
     audio(&mut m, 100, "a", 1, Some(Press::Long), true);
     state(&mut m, 130, true, 2);
@@ -262,7 +271,7 @@ fn resumed_short_is_removed_from_long_audio_and_has_its_own_tap_hook() {
 }
 #[test]
 fn expired_grace_stops_live_but_keeps_waiting_for_gapless_final() {
-    let mut m = SessionState::default();
+    let mut m = short_window();
     start_long(&mut m);
     state(&mut m, 100, false, 2);
     let t = m.tick(150).unwrap();
@@ -276,7 +285,7 @@ fn expired_grace_stops_live_but_keeps_waiting_for_gapless_final() {
 }
 #[test]
 fn unfinished_same_source_can_resume_after_grace_without_duplicate_session() {
-    let mut m = SessionState::default();
+    let mut m = short_window();
     let id = start_long(&mut m);
     state(&mut m, 100, false, 2);
     m.tick(150).unwrap();
@@ -288,7 +297,7 @@ fn unfinished_same_source_can_resume_after_grace_without_duplicate_session() {
 }
 #[test]
 fn repeated_false_and_late_final_do_not_extend_first_release_deadline() {
-    let mut m = SessionState::default();
+    let mut m = short_window();
     start_long(&mut m);
     state(&mut m, 100, false, 2);
     assert_eq!(
@@ -305,7 +314,7 @@ fn repeated_false_and_late_final_do_not_extend_first_release_deadline() {
 }
 #[test]
 fn old_final_and_old_batch_completion_cannot_end_new_holding() {
-    let mut m = SessionState::default();
+    let mut m = short_window();
     let old = start_long(&mut m);
     state(&mut m, 100, false, 2);
     m.tick(150).unwrap();
@@ -324,7 +333,7 @@ fn old_final_and_old_batch_completion_cannot_end_new_holding() {
 }
 #[test]
 fn cached_true_at_final_does_not_resume_without_a_new_state_observation() {
-    let mut m = SessionState::default();
+    let mut m = short_window();
     start_long(&mut m);
     let t = audio(&mut m, 100, "a", 1, Some(Press::Long), true);
     assert!(!t.snapshot.collecting);
@@ -333,7 +342,7 @@ fn cached_true_at_final_does_not_resume_without_a_new_state_observation() {
 }
 #[test]
 fn known_unparsed_collections_freeze_tap_watermark_without_unbounded_extension() {
-    let mut m = SessionState::default();
+    let mut m = short_window();
     audio(&mut m, 0, "a", 1, Some(Press::Short), true);
     m.observe(
         40,
@@ -350,7 +359,7 @@ fn known_unparsed_collections_freeze_tap_watermark_without_unbounded_extension()
         [Gesture::DoublePush]
     );
 
-    let mut m = SessionState::default();
+    let mut m = short_window();
     audio(&mut m, 0, "a", 1, Some(Press::Short), true);
     m.observe(
         40,
@@ -374,7 +383,7 @@ fn known_unparsed_collections_freeze_tap_watermark_without_unbounded_extension()
 
 #[test]
 fn state_count_hint_holds_single_until_range_and_known_metadata_arrive() {
-    let mut m = SessionState::default();
+    let mut m = short_window();
     audio(&mut m, 0, "a", 1, Some(Press::Short), true);
     m.observe(40, Observation::RangePending(true)).unwrap();
     assert!(gestures(&m.tick(50).unwrap()).is_empty());
@@ -397,7 +406,7 @@ fn state_count_hint_holds_single_until_range_and_known_metadata_arrive() {
 
 #[test]
 fn resolving_an_empty_hint_releases_single_and_later_hints_cannot_extend_it() {
-    let mut m = SessionState::default();
+    let mut m = short_window();
     audio(&mut m, 0, "a", 1, Some(Press::Short), true);
     m.observe(40, Observation::RangePending(true)).unwrap();
     m.tick(50).unwrap();
@@ -419,7 +428,7 @@ fn resolving_an_empty_hint_releases_single_and_later_hints_cannot_extend_it() {
 
 #[test]
 fn known_range_is_enough_and_does_not_wait_for_an_additional_refresh() {
-    let mut m = SessionState::default();
+    let mut m = short_window();
     audio(&mut m, 0, "a", 1, Some(Press::Short), true);
     m.observe(
         40,
@@ -438,7 +447,7 @@ fn known_range_is_enough_and_does_not_wait_for_an_additional_refresh() {
 }
 #[test]
 fn completed_long_without_s_gets_full_batch_without_recording_flash() {
-    let mut m = SessionState::default();
+    let mut m = short_window();
     let t = audio(&mut m, 0, "a", 1, Some(Press::Long), true);
     assert!(!t.sessions[0].visible);
     let t = m.tick(50).unwrap();
@@ -447,7 +456,7 @@ fn completed_long_without_s_gets_full_batch_without_recording_flash() {
 }
 #[test]
 fn long_classification_is_not_demoted_by_later_short_history() {
-    let mut m = SessionState::default();
+    let mut m = short_window();
     start_long(&mut m);
     audio(&mut m, 100, "a", 1, Some(Press::Short), true);
     let t = m.tick(150).unwrap();
@@ -456,7 +465,7 @@ fn long_classification_is_not_demoted_by_later_short_history() {
 }
 #[test]
 fn disconnect_is_not_release_or_five_second_cancellation() {
-    let mut m = SessionState::default();
+    let mut m = short_window();
     let id = start_long(&mut m);
     m.observe(100, Observation::Connected(false)).unwrap();
     let t = m.tick(60_000).unwrap();
@@ -471,7 +480,7 @@ fn disconnect_is_not_release_or_five_second_cancellation() {
 }
 #[test]
 fn settings_are_snapshotted_per_candidate() {
-    let mut m = SessionState::default();
+    let mut m = short_window();
     state(&mut m, 0, true, 1);
     m.configure(Reception {
         hold_ui_delay_ms: 10,
@@ -485,7 +494,7 @@ fn settings_are_snapshotted_per_candidate() {
 }
 #[test]
 fn input_at_ui_deadline_wins_and_stale_deadlines_cannot_show_short() {
-    let mut m = SessionState::default();
+    let mut m = short_window();
     state(&mut m, 0, true, 1);
     state(&mut m, 50, false, 1);
     audio(&mut m, 50, "a", 1, Some(Press::Short), true);
@@ -494,7 +503,7 @@ fn input_at_ui_deadline_wins_and_stale_deadlines_cannot_show_short() {
 }
 #[test]
 fn third_and_fourth_taps_form_pairs_and_hooks_are_not_repeated() {
-    let mut m = SessionState::default();
+    let mut m = short_window();
     for (i, name) in ["a", "b", "c", "d"].into_iter().enumerate() {
         let t = audio(
             &mut m,
@@ -517,7 +526,7 @@ fn third_and_fourth_taps_form_pairs_and_hooks_are_not_repeated() {
 }
 #[test]
 fn unknown_complete_audio_is_processed_independently_without_fake_gesture() {
-    let mut m = SessionState::default();
+    let mut m = short_window();
     start_long(&mut m);
     audio(&mut m, 100, "a", 1, Some(Press::Long), true);
     state(&mut m, 130, true, 2);
@@ -530,7 +539,7 @@ fn unknown_complete_audio_is_processed_independently_without_fake_gesture() {
 }
 #[test]
 fn missing_audio_is_explicit_error_and_remains_retained() {
-    let mut m = SessionState::default();
+    let mut m = short_window();
     start_long(&mut m);
     let t = m.observe(100, Observation::Lost("a".into())).unwrap();
     assert_eq!(t.snapshot.app_state, AppState::Error);
@@ -540,7 +549,7 @@ fn missing_audio_is_explicit_error_and_remains_retained() {
 
 #[test]
 fn next_true_before_previous_short_final_preserves_the_double_prefix() {
-    let mut m = SessionState::default();
+    let mut m = short_window();
     state(&mut m, 0, true, 1);
     audio(&mut m, 10, "a", 1, Some(Press::Short), false);
     state(&mut m, 20, false, 2);
@@ -553,7 +562,7 @@ fn next_true_before_previous_short_final_preserves_the_double_prefix() {
 }
 #[test]
 fn old_final_does_not_close_a_new_candidate_before_its_first_audio() {
-    let mut m = SessionState::default();
+    let mut m = short_window();
     let id = start_long(&mut m);
     state(&mut m, 100, false, 2);
     state(&mut m, 130, true, 2);
@@ -566,7 +575,7 @@ fn old_final_does_not_close_a_new_candidate_before_its_first_audio() {
 }
 #[test]
 fn distinct_long_sources_wait_for_parent_final_before_confirming_merge() {
-    let mut m = SessionState::default();
+    let mut m = short_window();
     let id = start_long(&mut m);
     state(&mut m, 100, false, 2);
     state(&mut m, 130, true, 2);
@@ -581,7 +590,7 @@ fn distinct_long_sources_wait_for_parent_final_before_confirming_merge() {
 }
 #[test]
 fn malformed_source_does_not_fire_timers_or_mutate_the_timeline() {
-    let mut m = SessionState::default();
+    let mut m = short_window();
     state(&mut m, 0, true, 1);
     assert!(
         m.observe(
@@ -602,7 +611,7 @@ fn malformed_source_does_not_fire_timers_or_mutate_the_timeline() {
 }
 #[test]
 fn a_source_cannot_move_between_sessions_as_later_collections_arrive() {
-    let mut m = SessionState::default();
+    let mut m = short_window();
     let old = start_long(&mut m);
     state(&mut m, 100, false, 2);
     m.tick(150).unwrap();
@@ -617,4 +626,23 @@ fn a_source_cannot_move_between_sessions_as_later_collections_arrive() {
         t.sessions.iter().find(|s| s.id == new).unwrap().sources,
         ["b"]
     );
+}
+
+#[test]
+fn default_tap_window_accepts_measured_241_and_270_ms_gaps_but_not_late_taps() {
+    for gap in [241, 270, 300] {
+        let mut m = SessionState::default();
+        audio(&mut m, 0, "a", 1, Some(Press::Short), true);
+        assert!(gestures(&m.tick(gap - 1).unwrap()).is_empty());
+        assert_eq!(
+            gestures(&audio(&mut m, gap, "b", 2, Some(Press::Short), true)),
+            [Gesture::DoublePush]
+        );
+        assert!(gestures(&m.tick(1000).unwrap()).is_empty());
+    }
+    let mut m = SessionState::default();
+    audio(&mut m, 0, "a", 1, Some(Press::Short), true);
+    assert_eq!(gestures(&m.tick(300).unwrap()), [Gesture::SinglePush]);
+    assert!(gestures(&audio(&mut m, 301, "b", 2, Some(Press::Short), true)).is_empty());
+    assert_eq!(gestures(&m.tick(601).unwrap()), [Gesture::SinglePush]);
 }

@@ -37,7 +37,8 @@ done
         std::fs::create_dir(&config).unwrap();
         std::fs::write(
             config.join("settings.json"),
-            json!({"presentation":{"live_mode":live}}).to_string(),
+            json!({"presentation":{"live_mode":live}, "reception":{"tap_sequence_grace_ms":50}})
+                .to_string(),
         )
         .unwrap();
         let options = json!({"address":"synthetic-ring", "language":"ja_JP", "command":"listen", "verbose":false});

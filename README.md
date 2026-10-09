@@ -335,7 +335,7 @@ Macの実際のBLE探索でリングを検出し、30秒探索がIPCの待機期
 - `src/reception/button_detector.rs` は83の既出prefixと再送を除き、新しいshort/longを取り出します。末尾bitや音声長だけで分類しません。
 - S=trueで音声を保持し、初期値50msの表示待ち後も収集中なら録音表示を始めます。この50msは表示の方針で、リング側のshort/longの閾値ではありません。
 - falseまたは対応するfinalから50msの再開猶予を設けます。猶予後はliveへの新規投入を止め、遅配音声を回収します。別sourceの結合は猶予内に再開したlong同士に限定します。
-- short+finalの確定後は50ms、次操作を待ちます。次もshortならDouble、trueが続いてlongならSingle→録音です。期限内に存在が分かった未解析Cは、固定した範囲まで解析を待ちます。
+- short+finalの確定後は300ms、次操作を待ちます。次もshortならDouble、trueが続いてlongならSingle→録音です。期限内に存在が分かった未解析Cは、固定した範囲まで解析を待ちます。
 - `session_state.rs` が時刻付き観測から状態と命令を決め、`input_effects.rs` が共有PCMへのcursorでliveの新規分と全文を作ります。受信ストアはfinalまでの欠番を確認し、認識完了まで音声を保持します。
 - liveの投入単位は初期値200msです。最後の端数は全文認識に含まれます。切断を解放とみなす処理や、5秒で音声を取り消す処理はありません。
 - shortの確定ではASR結果や空履歴を作らず、割当フックだけを実行します。`GestureHook::on_gesture` を実装し、`adapters/input/interaction.rs` の `hooks.register(...)` で登録できます。
