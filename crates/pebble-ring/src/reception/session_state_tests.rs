@@ -267,7 +267,19 @@ fn resumed_short_is_removed_from_long_audio_and_has_its_own_tap_hook() {
     let t = audio(&mut m, 200, "b", 2, Some(Press::Short), true);
     assert_eq!(batches(&t), [(id, vec!["a".into()])]);
     assert_eq!(t.sessions[0].sources, ["a"]);
-    assert_eq!(gestures(&m.tick(250).unwrap()), [Gesture::SinglePush]);
+    // The short follows a submitted recording, so it cancels it at once
+    // instead of waiting for the tap window.
+    assert_eq!(gestures(&t), [Gesture::LongHold, Gesture::SinglePush]);
+    let cancelled: Vec<_> = t
+        .actions
+        .iter()
+        .filter_map(|a| match a {
+            Action::Gesture(g) => Some(g.cancel_session),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(cancelled, [None, Some(id)]);
+    assert!(gestures(&m.tick(250).unwrap()).is_empty());
 }
 #[test]
 fn expired_grace_stops_live_but_keeps_waiting_for_gapless_final() {
@@ -636,7 +648,7 @@ fn default_tap_window_uses_early_count_hints_without_waiting_for_full_transfer()
         let mut m = SessionState::default();
         audio(&mut m, 0, "a", 1, Some(Press::Short), true);
         m.observe(hint, Observation::RangePending(true)).unwrap();
-        assert!(gestures(&m.tick(70).unwrap()).is_empty());
+        assert!(gestures(&m.tick(100).unwrap()).is_empty());
         m.observe(
             120,
             Observation::Watermark {
@@ -655,10 +667,10 @@ fn default_tap_window_uses_early_count_hints_without_waiting_for_full_transfer()
     }
     let mut m = SessionState::default();
     audio(&mut m, 0, "a", 1, Some(Press::Short), true);
-    assert!(gestures(&m.tick(69).unwrap()).is_empty());
-    assert_eq!(gestures(&m.tick(70).unwrap()), [Gesture::SinglePush]);
-    assert!(gestures(&audio(&mut m, 71, "b", 2, Some(Press::Short), true)).is_empty());
-    assert_eq!(gestures(&m.tick(141).unwrap()), [Gesture::SinglePush]);
+    assert!(gestures(&m.tick(99).unwrap()).is_empty());
+    assert_eq!(gestures(&m.tick(100).unwrap()), [Gesture::SinglePush]);
+    assert!(gestures(&audio(&mut m, 101, "b", 2, Some(Press::Short), true)).is_empty());
+    assert_eq!(gestures(&m.tick(201).unwrap()), [Gesture::SinglePush]);
 }
 
 #[test]

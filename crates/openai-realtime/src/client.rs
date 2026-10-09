@@ -48,6 +48,8 @@ impl RealtimeClient {
         model: &str,
         config: &SessionConfig,
     ) -> Result<(Self, mpsc::UnboundedReceiver<ServerEvent>)> {
+        // Several TLS providers are compiled in through other crates; pick one.
+        let _ = rustls::crypto::ring::default_provider().install_default();
         let url = format!("wss://api.openai.com/v1/realtime?model={model}");
         let mut request = url.into_client_request()?;
         request.headers_mut().insert(

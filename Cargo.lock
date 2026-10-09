@@ -4387,6 +4387,7 @@ dependencies = [
  "anyhow",
  "base64 0.22.1",
  "futures-util",
+ "rustls",
  "serde",
  "serde_json",
  "tokio",
