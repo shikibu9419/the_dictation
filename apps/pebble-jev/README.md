@@ -35,9 +35,9 @@ sh apps/pebble-jev/build-app.sh && open "target/Pebble Jev.app"
 | `api_key` | なし | 未設定なら `OPENAI_API_KEY` |
 | `model` | `gpt-realtime-2.1` | Realtime モデル |
 | `voice` | `marin` | 応答音声 |
-| `language` | `ja` | ユーザー音声の文字起こし言語 |
+| `languages` | `["ja","en"]` | 受け付ける言語。文字起こしのヒントになり、応答もこの言語に限定します |
 | `instructions` | 日本語の短い指示 | system プロンプト |
-| `reception` | dictation と同じ既定 | リングの受信タイミング |
+| `reception` | `state_poll_interval_ms` 150、他は dictation と同じ | リングの受信タイミング。状態ポーリングは音声読み出しと BLE 帯域を奪い合うため、dictation より長めにしています |
 
 ## 検証
 

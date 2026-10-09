@@ -108,7 +108,7 @@ printf '{"type":"ready"}\n'
 played=0
 while IFS= read -r line; do
   case "$line" in
-    *'"type":"audio"'*) played=$((played + 100)); printf '{"type":"played","ms":%s}\n' "$played";;
+    *'"type":"audio"'*) played=$((played + 100)); printf '{"type":"played","item":"x","ms":%s}\n' "$played";;
     *'"type":"clear"'*) played=0; printf '{"type":"cleared"}\n';;
   esac
 done

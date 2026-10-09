@@ -69,6 +69,7 @@ async fn spoken_request_streams_transcript_tool_call_and_audio() {
         transcription: Some(Transcription {
             model: "gpt-4o-mini-transcribe".into(),
             language: Some("ja".into()),
+            prompt: None,
         }),
         tools: vec![function_tool(
             "add_todo",

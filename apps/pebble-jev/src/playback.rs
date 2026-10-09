@@ -1,5 +1,6 @@
 //! Plays the assistant's PCM through the AudioPlayback Swift helper and
-//! tracks how much of it has been heard, for `conversation.item.truncate`.
+//! tracks which item is under the play head and how much of it has been
+//! heard, for `conversation.item.truncate`.
 use anyhow::{Context, Result};
 use base64::{Engine, engine::general_purpose::STANDARD};
 use pebble_core::{
@@ -7,17 +8,12 @@ use pebble_core::{
     output::Output,
 };
 use serde_json::json;
-use std::sync::{
-    Arc,
-    atomic::{AtomicU64, Ordering},
-};
+use std::sync::{Arc, Mutex};
 use tokio::process::Command;
 
 pub struct Playback {
     input: HelperInput,
-    played_ms: Arc<AtomicU64>,
-    /// Audio handed to the helper since the last clear; bounds `played_ms`.
-    queued_ms: AtomicU64,
+    position: Arc<Mutex<Option<(String, u64)>>>,
     _reader: tokio::task::JoinHandle<()>,
 }
 impl Playback {
@@ -34,14 +30,19 @@ impl Playback {
         let ready = helper.event().await?;
         anyhow::ensure!(ready["type"] == "ready", "Playback helper failed: {ready}");
         let input = helper.input();
-        let played_ms = Arc::new(AtomicU64::new(0));
-        let played = played_ms.clone();
+        let position = Arc::new(Mutex::new(None));
+        let reported = position.clone();
         let reader = tokio::spawn(async move {
             while let Ok(event) = helper.event().await {
                 match event["type"].as_str() {
                     Some("played") => {
-                        played.store(event["ms"].as_u64().unwrap_or(0), Ordering::SeqCst);
+                        if let (Some(item), Some(ms)) =
+                            (event["item"].as_str(), event["ms"].as_u64())
+                        {
+                            *reported.lock().unwrap() = Some((item.to_owned(), ms));
+                        }
                     }
+                    Some("cleared") => *reported.lock().unwrap() = None,
                     Some("error") => output.error(format!("Playback: {}", event["text"])),
                     _ => {}
                 }
@@ -49,32 +50,26 @@ impl Playback {
         });
         Ok(Self {
             input,
-            played_ms,
-            queued_ms: AtomicU64::new(0),
+            position,
             _reader: reader,
         })
     }
-    pub async fn push(&self, pcm: &[i16], rate: u32) -> Result<()> {
+    pub async fn push(&self, pcm: &[i16], rate: u32, item: &str) -> Result<()> {
         if pcm.is_empty() {
             return Ok(());
         }
         let bytes: Vec<u8> = pcm.iter().flat_map(|s| s.to_le_bytes()).collect();
-        self.queued_ms
-            .fetch_add(pcm.len() as u64 * 1000 / rate as u64, Ordering::SeqCst);
         self.input
-            .send(&json!({"type": "audio", "rate": rate, "pcm": STANDARD.encode(bytes)}))
+            .send(&json!({"type": "audio", "item": item, "rate": rate, "pcm": STANDARD.encode(bytes)}))
             .await
     }
     /// Stop immediately and drop queued audio.
     pub async fn clear(&self) -> Result<()> {
-        self.played_ms.store(0, Ordering::SeqCst);
-        self.queued_ms.store(0, Ordering::SeqCst);
+        *self.position.lock().unwrap() = None;
         self.input.send(&json!({"type": "clear"})).await
     }
-    /// Milliseconds actually heard, never past the audio queued so far.
-    pub fn played_ms(&self) -> u64 {
-        self.played_ms
-            .load(Ordering::SeqCst)
-            .min(self.queued_ms.load(Ordering::SeqCst))
+    /// The item being heard and how many milliseconds of it have played.
+    pub fn position(&self) -> Option<(String, u64)> {
+        self.position.lock().unwrap().clone()
     }
 }

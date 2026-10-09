@@ -18,8 +18,8 @@ pub struct Settings {
     pub api_key: Option<String>,
     pub model: String,
     pub voice: String,
-    /// BCP-47 language hint for user transcription.
-    pub language: String,
+    /// Languages the user may speak and the assistant may answer in (ISO 639-1).
+    pub languages: Vec<String>,
     pub instructions: String,
     pub reception: Reception,
 }
@@ -29,9 +29,14 @@ impl Default for Settings {
             api_key: None,
             model: openai_realtime::DEFAULT_MODEL.into(),
             voice: "marin".into(),
-            language: "ja".into(),
+            languages: vec!["ja".into(), "en".into()],
             instructions: DEFAULT_INSTRUCTIONS.into(),
-            reception: Reception::default(),
+            // State polls compete with audio reads for the BLE link; a slower
+            // poll leaves more of it for audio while the button is held.
+            reception: Reception {
+                state_poll_interval_ms: 150,
+                ..Reception::default()
+            },
         }
     }
 }
@@ -75,6 +80,25 @@ impl Settings {
         file.persist(path)?;
         Ok(())
     }
+    /// Instructions suffix that pins the conversation to `languages`.
+    pub fn language_rule(&self) -> String {
+        let names: Vec<&str> = self.languages.iter().map(|l| language_name(l)).collect();
+        format!(
+            "ユーザーは{}だけで話します。ユーザーが使った言語で答え、それ以外の言語は決して使わないでください。",
+            names.join("または")
+        )
+    }
+    /// Transcription language pin when exactly one language is allowed.
+    pub fn transcription_language(&self) -> Option<String> {
+        match self.languages.as_slice() {
+            [only] => Some(only.clone()),
+            _ => None,
+        }
+    }
+    pub fn transcription_prompt(&self) -> String {
+        let names: Vec<&str> = self.languages.iter().map(|l| language_name(l)).collect();
+        format!("発話は{}です。", names.join("または"))
+    }
     pub fn api_key(&self) -> Result<String> {
         if let Some(key) = self.api_key.as_deref().filter(|k| !k.trim().is_empty()) {
             return Ok(key.trim().to_owned());
@@ -89,9 +113,30 @@ impl Settings {
     }
 }
 
+fn language_name(code: &str) -> &str {
+    match code {
+        "ja" => "日本語",
+        "en" => "英語",
+        other => other,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn language_rule_names_every_allowed_language() {
+        let settings = Settings::default();
+        assert!(settings.language_rule().contains("日本語または英語"));
+        assert_eq!(settings.transcription_language(), None);
+        let single = Settings {
+            languages: vec!["ja".into()],
+            ..Settings::default()
+        };
+        assert_eq!(single.transcription_language().as_deref(), Some("ja"));
+        assert!(single.transcription_prompt().contains("日本語"));
+    }
 
     #[test]
     fn defaults_roundtrip_and_reject_unknown_keys() {

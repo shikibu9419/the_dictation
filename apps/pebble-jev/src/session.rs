@@ -228,11 +228,12 @@ pub async fn run(options: SessionOptions) -> Result<()> {
     let playback = Playback::start(output.clone()).await?;
     let tools = Tools::new(Settings::directory());
     let session_config = SessionConfig {
-        instructions: settings.instructions.clone(),
+        instructions: format!("{}\n{}", settings.instructions, settings.language_rule()),
         voice: settings.voice.clone(),
         transcription: Some(Transcription {
             model: "gpt-4o-mini-transcribe".into(),
-            language: Some(settings.language.clone()),
+            language: settings.transcription_language(),
+            prompt: Some(settings.transcription_prompt()),
         }),
         tools: crate::tools::specs(),
         ..SessionConfig::default()
@@ -325,12 +326,14 @@ impl Talk<'_> {
             self.client.cancel_response()?;
             self.response_active = false;
         }
-        if let Some(item) = self.speaking_item.take() {
-            let played = self.playback.played_ms();
+        let position = self.playback.position();
+        if self.speaking_item.take().is_some() || position.is_some() {
             self.playback.clear().await?;
-            if played > 0 {
-                self.client.truncate(&item, played)?;
-            }
+        }
+        if let Some((item, played_ms)) = position
+            && played_ms > 0
+        {
+            self.client.truncate(&item, played_ms)?;
         }
         Ok(())
     }
@@ -479,7 +482,8 @@ impl Talk<'_> {
                     self.speaking_item = Some(item_id);
                     (self.ui)(UiEvent::Speaking);
                 }
-                self.playback.push(&pcm, OUTPUT_SAMPLE_RATE).await?;
+                let item = self.speaking_item.clone().unwrap_or_default();
+                self.playback.push(&pcm, OUTPUT_SAMPLE_RATE, &item).await?;
             }
             ServerEvent::ResponseOutputAudioTranscriptDelta { item_id, delta, .. }
             | ServerEvent::ResponseOutputTextDelta { item_id, delta, .. } => {

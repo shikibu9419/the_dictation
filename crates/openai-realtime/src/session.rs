@@ -9,6 +9,8 @@ pub const OUTPUT_SAMPLE_RATE: u32 = 24_000;
 pub struct Transcription {
     pub model: String,
     pub language: Option<String>,
+    /// Free text that steers the transcription model, e.g. expected languages.
+    pub prompt: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -31,6 +33,7 @@ impl Default for SessionConfig {
             transcription: Some(Transcription {
                 model: "gpt-4o-mini-transcribe".into(),
                 language: None,
+                prompt: None,
             }),
             tools: vec![],
             reasoning_effort: Some("low".into()),
@@ -50,6 +53,9 @@ impl SessionConfig {
             let mut value = json!({"model": transcription.model});
             if let Some(language) = &transcription.language {
                 value["language"] = json!(language);
+            }
+            if let Some(prompt) = &transcription.prompt {
+                value["prompt"] = json!(prompt);
             }
             input["transcription"] = value;
         }
@@ -102,6 +108,7 @@ mod tests {
             transcription: Some(Transcription {
                 model: "gpt-4o-mini-transcribe".into(),
                 language: Some("ja".into()),
+                prompt: Some("Japanese".into()),
             }),
             ..SessionConfig::default()
         };
@@ -110,6 +117,10 @@ mod tests {
         assert_eq!(session["audio"]["input"]["format"]["rate"], 24000);
         assert!(session["audio"]["input"]["turn_detection"].is_null());
         assert_eq!(session["audio"]["input"]["transcription"]["language"], "ja");
+        assert_eq!(
+            session["audio"]["input"]["transcription"]["prompt"],
+            "Japanese"
+        );
         assert_eq!(session["audio"]["output"]["voice"], "marin");
         assert_eq!(session["tools"][0]["type"], "function");
         assert_eq!(session["tools"][0]["name"], "add_todo");

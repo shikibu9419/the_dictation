@@ -1,14 +1,17 @@
 import AVFoundation
 import Foundation
 
-// JSONL on stdin: {"type":"audio","rate":24000,"pcm":"<base64 s16le mono>"} and {"type":"clear"}.
-// JSONL on stdout: {"type":"ready"}, {"type":"played","ms":N} while playing, {"type":"cleared"}.
+// JSONL on stdin: {"type":"audio","item":"<id>","rate":24000,"pcm":"<base64 s16le mono>"} and {"type":"clear"}.
+// JSONL on stdout: {"type":"ready"}, {"type":"played","item":"<id>","ms":N} while playing, {"type":"cleared"}.
+// `played` names the item under the play head and how much of it has been heard.
 final class Player {
     private let engine = AVAudioEngine()
     private let node = AVAudioPlayerNode()
     private var format: AVAudioFormat?
     let queue = DispatchQueue(label: "PebbleJev.Playback")
     private var timer: DispatchSourceTimer?
+    /// Scheduled buffers in play order since the last clear: (item, frames).
+    private var scheduled: [(item: String, frames: Int)] = []
 
     func emit(_ value: [String: Any]) {
         guard let data = try? JSONSerialization.data(withJSONObject: value) else { return }
@@ -26,7 +29,7 @@ final class Player {
         try engine.start()
         format = target
     }
-    func push(base64: String, rate: Double) {
+    func push(base64: String, rate: Double, item: String) {
         guard let data = Data(base64Encoded: base64), data.count >= 2 else { return }
         do { try ensureEngine(rate: rate) } catch {
             emit(["type": "error", "text": error.localizedDescription]); return
@@ -39,6 +42,7 @@ final class Player {
             let destination = buffer.floatChannelData![0]
             for i in 0..<frames { destination[i] = Float(Int16(littleEndian: source[i])) / 32768 }
         }
+        scheduled.append((item, frames))
         node.scheduleBuffer(buffer, completionCallbackType: .dataPlayedBack) { [weak self] _ in
             self?.queue.async { self?.report() }
         }
@@ -48,16 +52,34 @@ final class Player {
     func clear() {
         node.stop()
         node.reset()
+        scheduled.removeAll()
         stopTimer()
-        emit(["type": "played", "ms": 0])
         emit(["type": "cleared"])
     }
-    private func playedMilliseconds() -> Int {
+    private func playedFrames() -> Int {
         guard let nodeTime = node.lastRenderTime, let playerTime = node.playerTime(forNodeTime: nodeTime) else { return 0 }
-        return Int(Double(playerTime.sampleTime) * 1000 / playerTime.sampleRate)
+        return Int(playerTime.sampleTime)
+    }
+    /// The item under the play head and the frames of it already rendered.
+    private func position() -> (item: String, frames: Int)? {
+        let head = playedFrames()
+        var cursor = 0
+        var current: (item: String, frames: Int)?
+        for entry in scheduled {
+            let start = cursor
+            cursor += entry.frames
+            if current?.item == entry.item {
+                current!.frames += max(0, min(entry.frames, head - start))
+            } else if head >= start || current == nil {
+                current = (entry.item, max(0, min(entry.frames, head - start)))
+            }
+            if head < cursor { break }
+        }
+        return current
     }
     private func report() {
-        emit(["type": "played", "ms": playedMilliseconds()])
+        guard let (item, frames) = position(), let rate = format?.sampleRate else { return }
+        emit(["type": "played", "item": item, "ms": Int(Double(frames) * 1000 / rate)])
     }
     private func startTimer() {
         guard timer == nil else { return }
@@ -88,7 +110,7 @@ final class Player {
                     switch request["type"] as? String {
                     case "audio":
                         let rate = (request["rate"] as? Double) ?? 24000
-                        player.push(base64: request["pcm"] as? String ?? "", rate: rate)
+                        player.push(base64: request["pcm"] as? String ?? "", rate: rate, item: request["item"] as? String ?? "")
                     case "clear":
                         player.clear()
                     default:
