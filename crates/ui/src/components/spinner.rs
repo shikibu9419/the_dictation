@@ -1,6 +1,5 @@
 use gpui::{
-    Animation, AnimationExt, App, IntoElement, PathBuilder, RenderOnce, Styled, Window, canvas,
-    div, point, px, rgba,
+    Animation, AnimationExt, App, PathBuilder, Window, canvas, div, point, prelude::*, px, rgba,
 };
 use std::time::Duration;
 

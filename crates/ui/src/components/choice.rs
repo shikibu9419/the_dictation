@@ -1,7 +1,4 @@
-use gpui::{
-    App, ClickEvent, ElementId, InteractiveElement, IntoElement, ParentElement, RenderOnce,
-    SharedString, StatefulInteractiveElement, Styled, Window, div, px, rgb,
-};
+use gpui::{App, ClickEvent, ElementId, SharedString, Window, div, prelude::*, px, rgb};
 
 type ClickHandler = Box<dyn Fn(&ClickEvent, &mut Window, &mut App) + 'static>;
 

@@ -1,8 +1,7 @@
 use super::pulse;
 use crate::theme::ACCENT;
 use gpui::{
-    Animation, AnimationExt, App, BoxShadow, IntoElement, RenderOnce, Styled, Window, div, point,
-    px, rgb, rgba,
+    Animation, AnimationExt, App, BoxShadow, Window, div, point, prelude::*, px, rgb, rgba,
 };
 use std::time::Duration;
 

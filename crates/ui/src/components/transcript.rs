@@ -1,7 +1,4 @@
-use gpui::{
-    App, Entity, IntoElement, ParentElement, RenderOnce, ScrollHandle, SharedString,
-    StatefulInteractiveElement, Styled, Window, div, px,
-};
+use gpui::{App, Entity, ScrollHandle, SharedString, Window, div, prelude::*, px};
 use gpui_component::input::{Input, InputState};
 
 /// Transcript column: a read-only scrolling label, or the editor when an

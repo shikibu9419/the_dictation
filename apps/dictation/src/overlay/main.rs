@@ -9,18 +9,17 @@ mod settings_view;
 use futures::{StreamExt, channel::mpsc};
 use gpui::{prelude::*, *};
 use gpui_component::{
-    Root, Theme, ThemeMode,
-    input::{Input, InputEvent, InputState, Position},
+    Root,
+    input::{InputEvent, InputState, Position},
 };
 use model::{Event, Model, Phase};
-use pebble_ui::panel::{
-    index_frontmost_pid, index_panel_audio_level, index_panel_audio_state, index_panel_editing,
-    index_panel_hide, index_panel_request_frame, index_panel_resize, index_panel_setup,
-    index_panel_show, index_panel_visible, index_permission, index_reduce_motion, index_status,
+use pebble_ui::{
+    components::{MicIcon, PanelSurface, RecordingDot, Spinner, Transcript},
+    panel,
+    text::measure_body_height,
+    theme,
 };
-use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use std::{
-    ffi::CString,
     io::{BufRead, BufReader, Write},
     process::{Child, ChildStdin, Command, Stdio},
     sync::OnceLock,
@@ -37,6 +36,38 @@ fn accepts_generation(active: Option<u64>, incoming: Option<u64>) -> bool {
 }
 
 static EVENTS: OnceLock<mpsc::UnboundedSender<Message>> = OnceLock::new();
+const MENU: &[panel::MenuItem] = &[
+    panel::MenuItem {
+        title: "Index Voice · 準備中",
+        tag: 0,
+        key: "",
+    },
+    panel::MenuItem {
+        title: "設定…",
+        tag: 6,
+        key: ",",
+    },
+    panel::MenuItem {
+        title: "文字起こし履歴",
+        tag: 8,
+        key: "",
+    },
+    panel::MenuItem {
+        title: "貼り付けのアクセス許可…",
+        tag: 1,
+        key: "",
+    },
+    panel::MenuItem {
+        title: "リロード",
+        tag: 2,
+        key: "",
+    },
+    panel::MenuItem {
+        title: "終了",
+        tag: 3,
+        key: "",
+    },
+];
 extern "C" fn menu_action(action: i32) {
     if let Some(tx) = EVENTS.get() {
         let _ = tx.unbounded_send(Message::Menu(action));
@@ -234,7 +265,7 @@ impl Overlay {
             if !this.pasting
                 && this.editing == editing
                 && this.input.read(cx).cursor() == before
-                && this.model.browse(older, unsafe { index_frontmost_pid() })
+                && this.model.browse(older, panel::frontmost_pid())
             {
                 this.update_panel(window, cx);
             }
@@ -266,30 +297,7 @@ impl Overlay {
                 .into()
             });
         // The editor and live label use the same width and line metrics.
-        let measured = window
-            .text_system()
-            .shape_text(
-                text.clone().into(),
-                px(22.5),
-                &[TextRun {
-                    len: text.len(),
-                    font: font(".AppleSystemUIFont"),
-                    color: rgb(0xf3f6fa).into(),
-                    background_color: None,
-                    underline: None,
-                    strikethrough: None,
-                }],
-                Some(px(487.)),
-                None,
-            )
-            .map(|lines| {
-                lines
-                    .iter()
-                    .map(|line| f32::from(line.size(px(30.)).height))
-                    .sum::<f32>()
-            })
-            .unwrap_or(30.);
-        let body_height = measured.clamp(30., 300.);
+        let body_height = measure_body_height(window, &text, 22.5, 30., 487., 30., 300.);
         let height = if circular { 96. } else { body_height + 44. };
         (circular, text, body_height, height)
     }
@@ -307,15 +315,11 @@ impl Overlay {
         if self.panel_height != height || self.panel_circular != circular {
             self.panel_height = height;
             self.panel_circular = circular;
-            unsafe {
-                index_panel_resize(if circular { 96. } else { 580. }, height as f64, circular);
-            }
+            panel::resize(if circular { 96. } else { 580. }, height as f64, circular);
         }
 
         let audio_recording = self.audio_feedback_recording().map_or(0, |item| item.id);
-        unsafe {
-            index_panel_audio_state(audio_recording);
-        }
+        panel::audio_state(audio_recording);
         let was_editing = self.editing;
         let editable = self
             .model
@@ -342,9 +346,7 @@ impl Overlay {
             self.editing = None;
         }
         if self.editing != was_editing {
-            unsafe {
-                index_panel_editing(self.editing.is_some());
-            }
+            panel::editing(self.editing.is_some());
         }
         let visible = !self.pasting
             && presentation::surface(
@@ -354,7 +356,7 @@ impl Overlay {
                 self.model.history_view,
             ) != presentation::Surface::Hidden;
         let item_id = self.model.visible().map(|item| item.id);
-        unsafe {
+        {
             let title = if self.model.error.is_some() {
                 "Index Voice · 接続エラー"
             } else if self.model.ready {
@@ -368,12 +370,12 @@ impl Overlay {
             } else {
                 "Index Voice · 準備中"
             };
-            index_status(CString::new(title).unwrap().as_ptr());
-            if visible && (!self.shown || self.shown_item != item_id || !index_panel_visible()) {
+            panel::status(title);
+            if visible && (!self.shown || self.shown_item != item_id || !panel::visible()) {
                 let pid = self
                     .model
                     .visible()
-                    .map_or(index_frontmost_pid(), |i| i.target);
+                    .map_or(panel::frontmost_pid(), |i| i.target);
                 if self.verbose {
                     eprintln!("[GUI] show item={item_id:?} target_pid={pid}");
                 }
@@ -391,7 +393,7 @@ impl Overlay {
                     if this.presentation_revision != revision || this.pasting || !this.shown {
                         return;
                     }
-                    index_panel_show(pid);
+                    panel::show(pid);
                     if this.editing.is_some() {
                         this.input.update(cx, |input, cx| input.focus(window, cx));
                     } else {
@@ -400,9 +402,9 @@ impl Overlay {
                 });
                 // A hidden macOS window has stopped its display link.
                 // Force a frame after geometry, without making it visible.
-                index_panel_request_frame();
+                panel::request_frame();
             } else if !visible && self.shown {
-                index_panel_hide();
+                panel::hide();
             }
         }
         self.shown = visible;
@@ -429,7 +431,7 @@ impl Overlay {
         if event.r#type == "text" {
             self.scroll.scroll_to_bottom();
         }
-        let target = unsafe { index_frontmost_pid() };
+        let target = panel::frontmost_pid();
         if self.verbose {
             eprintln!(
                 "[GUI {}] event={} recording={:?} target_pid={target}",
@@ -511,7 +513,7 @@ impl Overlay {
         else {
             return;
         };
-        let target = unsafe { index_frontmost_pid() };
+        let target = panel::frontmost_pid();
         match action {
             settings::GestureAction::None => {}
             settings::GestureAction::History => {
@@ -614,53 +616,6 @@ impl Overlay {
         cx.notify();
     }
 }
-fn microphone() -> impl IntoElement {
-    div().size(px(24.)).rounded_full().with_animation(
-        "microphone-glow",
-        Animation::new(Duration::from_millis(1067)).repeat(),
-        |d, delta| {
-            let alpha = if unsafe { index_reduce_motion() } {
-                0.35
-            } else {
-                0.12 + 0.28 * (1. - (delta * std::f32::consts::TAU).cos()) / 2.
-            };
-            d.shadow(vec![BoxShadow {
-                color: rgba(0xff334b00 | (alpha * 255.) as u32).into(),
-                offset: point(px(0.), px(0.)),
-                blur_radius: px(7.),
-                spread_radius: px(0.),
-            }])
-            .child(
-                canvas(
-                    |_, _, _| (),
-                    |bounds, _, window, _| {
-                        let center = bounds.center();
-                        let mut path = PathBuilder::stroke(px(2.2));
-                        let p = |x: f32, y: f32| center + point(px(x), px(y));
-                        path.move_to(p(-4., -7.));
-                        path.cubic_bezier_to(p(4., -7.), p(-4., -12.), p(4., -12.));
-                        path.line_to(p(4., 1.));
-                        path.cubic_bezier_to(p(-4., 1.), p(4., 6.), p(-4., 6.));
-                        path.close();
-                        path.move_to(p(-7., -1.));
-                        path.line_to(p(-7., 1.));
-                        path.cubic_bezier_to(p(7., 1.), p(-7., 10.), p(7., 10.));
-                        path.line_to(p(7., -1.));
-                        path.move_to(p(0., 7.));
-                        path.line_to(p(0., 11.));
-                        path.move_to(p(-4., 11.));
-                        path.line_to(p(4., 11.));
-                        if let Ok(path) = path.build() {
-                            window.paint_path(path, rgb(0xff334b));
-                        }
-                    },
-                )
-                .size_full(),
-            )
-        },
-    )
-}
-
 impl Render for Overlay {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let item = self.model.visible();
@@ -678,6 +633,24 @@ impl Render for Overlay {
         );
         let editable = phase == Some(Phase::Ready) && self.model.error.is_none();
         let (_, text, body_height, _) = self.panel_layout(window);
+        let reduce_motion = panel::reduce_motion();
+        let mut surface = PanelSurface::new(circular);
+        if recording {
+            surface = if circular {
+                surface.indicator(MicIcon::new(reduce_motion))
+            } else {
+                surface.indicator(RecordingDot::new(reduce_motion))
+            };
+        } else if busy {
+            surface = surface.indicator(Spinner::new(reduce_motion));
+        }
+        if !circular {
+            let mut transcript = Transcript::new(text, body_height).scroll(self.scroll.clone());
+            if editable {
+                transcript = transcript.editor(self.input.clone());
+            }
+            surface = surface.body(transcript);
+        }
         div()
             .id("dictation")
             .track_focus(&self.focus)
@@ -695,138 +668,7 @@ impl Render for Overlay {
             .on_action(cx.listener(Self::paste))
             .on_action(cx.listener(Self::dismiss))
             .size_full()
-            .p(px(if circular { 20. } else { 10. }))
-            .font_family(".AppleSystemUIFont")
-            .text_size(px(22.5))
-            .text_color(rgb(0xf3f6fa))
-            .child(
-                div()
-                    .size_full()
-                    .flex()
-                    .items_start()
-                    .py(px(if circular { 0. } else { 12. }))
-                    .px(px(if circular { 0. } else { 16. }))
-                    .gap(px(if circular { 0. } else { 10. }))
-                    .when(circular, |d| d.items_center().justify_center())
-                    .rounded(px(if circular { 28. } else { 18. }))
-                    .bg(rgba(0x48484818))
-                    .child(
-                        div()
-                            .flex_none()
-                            .w(px(21.))
-                            .h(px(30.))
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .when(recording && !circular, |d| {
-                                d.child(
-                                    div()
-                                        .size(px(15.))
-                                        .rounded_full()
-                                        .bg(rgb(0xff334b))
-                                        .with_animation(
-                                            "recording-glow",
-                                            Animation::new(Duration::from_millis(1067)).repeat(),
-                                            |d, delta| {
-                                                let alpha = if unsafe { index_reduce_motion() } {
-                                                    0.65
-                                                } else {
-                                                    0.12 + 0.53
-                                                        * (1.
-                                                            - (delta * std::f32::consts::TAU).cos())
-                                                        / 2.
-                                                };
-                                                d.shadow(vec![BoxShadow {
-                                                    color: rgba(0xff334b00 | (alpha * 255.) as u32)
-                                                        .into(),
-                                                    offset: point(px(0.), px(0.)),
-                                                    blur_radius: px(4.),
-                                                    spread_radius: px(1.5),
-                                                }])
-                                            },
-                                        ),
-                                )
-                            })
-                            .when(recording && circular, |d| d.child(microphone()))
-                            .when(busy, |d| {
-                                d.child(div().size(px(21.)).with_animation(
-                                    "processing",
-                                    Animation::new(Duration::from_millis(850)).repeat(),
-                                    |d, delta| {
-                                        d.child(
-                                            canvas(
-                                                |_, _, _| (),
-                                                move |bounds, _, window, _| {
-                                                    for n in 0..48 {
-                                                        let mut path = PathBuilder::stroke(px(3.));
-                                                        for step in 0..=2 {
-                                                            let angle = (delta
-                                                                + (n as f32 + step as f32 / 2.)
-                                                                    / 56.)
-                                                                * std::f32::consts::TAU;
-                                                            let p = bounds.center()
-                                                                + point(
-                                                                    px(angle.cos() * 8.25),
-                                                                    px(angle.sin() * 8.25),
-                                                                );
-                                                            if step == 0 {
-                                                                path.move_to(p);
-                                                            } else {
-                                                                path.line_to(p);
-                                                            }
-                                                        }
-                                                        if let Ok(path) = path.build() {
-                                                            let alpha = (20.
-                                                                + 235. * (n as f32 / 47.).powf(1.5))
-                                                                as u32;
-                                                            window.paint_path(
-                                                                path,
-                                                                rgba(0xe5e5e500 | alpha),
-                                                            );
-                                                        }
-                                                    }
-                                                },
-                                            )
-                                            .size_full(),
-                                        )
-                                    },
-                                ))
-                            }),
-                    )
-                    .when(!circular, |d| {
-                        d.child(
-                            div()
-                                .w(px(497.))
-                                .flex_none()
-                                .flex()
-                                .flex_col()
-                                .when(editable, |d| {
-                                    d.child(
-                                        Input::new(&self.input)
-                                            .appearance(false)
-                                            .bordered(false)
-                                            .focus_bordered(false)
-                                            .h(px(body_height))
-                                            .p_0()
-                                            .text_size(px(22.5))
-                                            .line_height(px(30.)),
-                                    )
-                                })
-                                .when(!editable, |d| {
-                                    d.child(
-                                        div()
-                                            .id("transcript")
-                                            .w(px(487.))
-                                            .h(px(body_height))
-                                            .overflow_y_scroll()
-                                            .track_scroll(&self.scroll)
-                                            .line_height(px(30.))
-                                            .child(text),
-                                    )
-                                }),
-                        )
-                    }),
-            )
+            .child(surface)
     }
 }
 
@@ -873,18 +715,14 @@ fn main() -> anyhow::Result<()> {
     let (tx, mut events) = mpsc::unbounded();
     let _ = EVENTS.set(tx);
     Application::new().run(move |cx: &mut App| {
-        gpui_component::init(cx);
-        Theme::change(ThemeMode::Dark, None, cx);
-        Theme::global_mut(cx).background = transparent_black();
-        Theme::global_mut(cx).selection = rgba(0x62ddff40).into();
-        Theme::global_mut(cx).caret = rgb(0x8bedff).into();
+        theme::init(cx);
         cx.bind_keys([KeyBinding::new("ctrl-h", gpui_component::input::Backspace, Some("Input")), KeyBinding::new("ctrl-p", gpui_component::input::MoveUp, Some("Input")), KeyBinding::new("ctrl-n", gpui_component::input::MoveDown, Some("Input")), KeyBinding::new("shift-enter", gpui_component::input::Enter { secondary: true }, Some("Input")), KeyBinding::new("enter", Paste, Some("Input")), KeyBinding::new("escape", Dismiss, Some("Input")), KeyBinding::new("enter", Paste, Some("Dictation")), KeyBinding::new("escape", Dismiss, Some("Dictation")), KeyBinding::new("cmd-q", Quit, None)]);
         cx.on_action(|_: &Quit, cx| cx.quit());
         let bounds = Bounds::centered(None, size(px(580.), px(58.)), cx);
         let mut overlay = None;
         let _handle = cx.open_window(WindowOptions { window_bounds: Some(WindowBounds::Windowed(bounds)), titlebar: None, kind: WindowKind::Normal,
             focus: false, show: false, is_resizable: false, is_minimizable: false, window_background: WindowBackgroundAppearance::Transparent, ..Default::default() }, |window, cx| {
-            if let RawWindowHandle::AppKit(handle) = HasWindowHandle::window_handle(window).unwrap().as_raw() { unsafe { index_panel_setup(handle.ns_view.as_ptr(), menu_action);  } }
+            panel::setup(window, MENU, menu_action);
             let input = cx.new(|cx| InputState::new(window, cx).multi_line(true).rows(1));
             let view = cx.new(|cx| {
                 let subscription = cx.subscribe_in(&input, window, |this: &mut Overlay, input, event, window, cx| {
@@ -905,7 +743,7 @@ fn main() -> anyhow::Result<()> {
                                 let reason = this.model.error.clone().unwrap_or_else(|| "受信が終了しました。メニューからリロードしてください。".into());
                                 this.event(Event::error(reason), window, cx);
                             }
-                            Message::Menu(1) => { if let Some(backend) = &mut this.backend { let _ = backend.send(serde_json::json!({"type":"permission"})); } else { unsafe { index_permission(); } } },
+                            Message::Menu(1) => { if let Some(backend) = &mut this.backend { let _ = backend.send(serde_json::json!({"type":"permission"})); } else { panel::request_permission(); } },
                             Message::Control(event, generation) if accepts_generation(this.backend.as_ref().map(|b| b.generation), generation) => {
                                 if event["type"] == "gesture" { this.gesture(&event, window, cx); }
                                 if event["type"] == "audio_level" {
@@ -916,7 +754,7 @@ fn main() -> anyhow::Result<()> {
                                     let active = recording.is_some();
                                     if this.verbose { eprintln!("[GUI] Audio meter delivery_ms={age} active={active} stale={}", age > 500); }
                                     if age <= 500 && let Some(recording) = recording {
-                                        unsafe { index_panel_audio_level(recording, event["level"].as_f64().unwrap_or(0.)); } }
+                                        panel::audio_level(recording, event["level"].as_f64().unwrap_or(0.)); }
                                 }
                                 if event["type"] == "paste_result" {
                                     this.pasting = false;
@@ -929,11 +767,11 @@ fn main() -> anyhow::Result<()> {
                                 if event["success"] == false || event["allowed"] == false {
                                     let reason = event["text"].as_str().unwrap_or("自動貼り付けできませんでした");
                                     eprintln!("[GUI] {reason}");
-                                    if let Ok(title) = CString::new(reason) { unsafe { index_status(title.as_ptr()); } }
+                                    panel::status(reason);
                                 }
                             },
                             Message::Menu(3) => cx.quit(),
-                            Message::Menu(8) => { if !this.pasting { this.model.open_history(unsafe { index_frontmost_pid() }); this.update_panel(window,cx); } },
+                            Message::Menu(8) => { if !this.pasting { this.model.open_history(panel::frontmost_pid()); this.update_panel(window,cx); } },
                             Message::Menu(4) => { if this.editing.is_some() { this.input.update(cx, |input, cx| input.focus(window, cx)); } else { window.focus(&this.focus); } cx.notify(); },
                             Message::Menu(6) => {
                                 let existing = this.settings_window.is_some_and(|handle| handle.update(cx, |_, window, _| window.activate_window()).is_ok());

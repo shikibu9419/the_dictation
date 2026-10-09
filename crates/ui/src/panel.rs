@@ -2,7 +2,7 @@
 //! glow, status menu and IME hooks. One panel exists per process.
 use gpui::Window;
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
-use std::ffi::{CString, c_char, c_void};
+use std::ffi::{CString, c_char};
 
 mod ffi {
     use std::ffi::{c_char, c_void};
@@ -61,7 +61,7 @@ pub fn setup(window: &Window, menu: &[MenuItem], on_menu: extern "C" fn(i32)) {
     let tags: Vec<i32> = menu.iter().map(|item| item.tag).collect();
     unsafe {
         ffi::index_panel_setup(
-            handle.ns_view.as_ptr() as *mut c_void,
+            handle.ns_view.as_ptr(),
             on_menu,
             title_ptrs.as_ptr(),
             tags.as_ptr(),

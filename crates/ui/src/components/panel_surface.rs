@@ -1,7 +1,5 @@
 use crate::theme::{FONT, TEXT};
-use gpui::{
-    AnyElement, App, IntoElement, ParentElement, RenderOnce, Styled, Window, div, px, rgb, rgba,
-};
+use gpui::{AnyElement, App, Window, div, prelude::*, px, rgb, rgba};
 
 /// Rounded glass frame of a floating panel: a fixed indicator slot on the
 /// left and an optional body. `circular` collapses it to the indicator alone.

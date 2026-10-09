@@ -3,6 +3,7 @@ use crate::{
     settings::{GestureAction, InputSource, Settings, SpeechModel},
 };
 use gpui::{prelude::*, *};
+use pebble_ui::components::Choice;
 use std::path::PathBuf;
 
 pub struct SettingsView {
@@ -91,26 +92,6 @@ impl SettingsView {
         }
     }
 }
-fn choice(id: &'static str, label: &'static str, selected: bool) -> Stateful<Div> {
-    div()
-        .id(id)
-        .flex_1()
-        .px(px(14.))
-        .py(px(12.))
-        .rounded(px(10.))
-        .cursor_pointer()
-        .bg(if selected {
-            rgb(0x484848)
-        } else {
-            rgb(0x262626)
-        })
-        .text_color(if selected {
-            rgb(0xf4f4f4)
-        } else {
-            rgb(0xa2a2a2)
-        })
-        .child(label)
-}
 impl Render for SettingsView {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         div()
@@ -140,7 +121,7 @@ impl Render for SettingsView {
                                     .flex()
                                     .gap(px(8.))
                                     .child(
-                                        choice(
+                                        Choice::new(
                                             "input-index",
                                             "Pebble Index",
                                             self.settings.input == InputSource::Index,
@@ -152,7 +133,7 @@ impl Render for SettingsView {
                                         ),
                                     )
                                     .child(
-                                        choice(
+                                        Choice::new(
                                             "input-mic",
                                             "PCマイク · 右Option",
                                             self.settings.input == InputSource::Microphone,
@@ -182,7 +163,7 @@ impl Render for SettingsView {
                                     .flex()
                                     .gap(px(8.))
                                     .child(
-                                        choice(
+                                        Choice::new(
                                             "engine-apple",
                                             "SpeechAnalyzer",
                                             self.settings.speech == SpeechModel::Apple,
@@ -194,7 +175,7 @@ impl Render for SettingsView {
                                         ),
                                     )
                                     .child(
-                                        choice(
+                                        Choice::new(
                                             "engine-on-device",
                                             "On Device",
                                             self.settings.speech == SpeechModel::OnDevice,
@@ -218,7 +199,7 @@ impl Render for SettingsView {
                                     .flex()
                                     .gap(px(8.))
                                     .child(
-                                        choice(
+                                        Choice::new(
                                             "batch-apple",
                                             "SpeechAnalyzer",
                                             self.settings.recognition_plan().batch
@@ -233,7 +214,7 @@ impl Render for SettingsView {
                                         ),
                                     )
                                     .child(
-                                        choice(
+                                        Choice::new(
                                             "batch-device",
                                             "Qwen3-ASR 1.7B",
                                             self.settings.recognition_plan().batch
@@ -260,7 +241,7 @@ impl Render for SettingsView {
                                     .flex()
                                     .gap(px(8.))
                                     .child(
-                                        choice(
+                                        Choice::new(
                                             "live-show",
                                             "オン",
                                             self.settings.presentation.live_mode,
@@ -273,7 +254,7 @@ impl Render for SettingsView {
                                         ),
                                     )
                                     .child(
-                                        choice(
+                                        Choice::new(
                                             "live-hide",
                                             "オフ（履歴以外は文字を表示しない）",
                                             !self.settings.presentation.live_mode,
@@ -298,7 +279,7 @@ impl Render for SettingsView {
                                     .flex()
                                     .gap(px(8.))
                                     .child(
-                                        choice(
+                                        Choice::new(
                                             "final-show",
                                             "表示して編集",
                                             self.settings.presentation.final_text,
@@ -311,7 +292,7 @@ impl Render for SettingsView {
                                         ),
                                     )
                                     .child(
-                                        choice(
+                                        Choice::new(
                                             "final-hide",
                                             "表示せず閉じる",
                                             !self.settings.presentation.final_text,
@@ -342,7 +323,7 @@ impl Render for SettingsView {
                                     .flex()
                                     .gap(px(8.))
                                     .child(
-                                        choice(
+                                        Choice::new(
                                             "single_tap-history",
                                             "履歴を開く",
                                             self.settings.gestures.single_tap
@@ -357,7 +338,7 @@ impl Render for SettingsView {
                                         ),
                                     )
                                     .child(
-                                        choice(
+                                        Choice::new(
                                             "single_tap-paste",
                                             "現在の入力先へペースト",
                                             self.settings.gestures.single_tap
@@ -384,7 +365,7 @@ impl Render for SettingsView {
                                     .flex()
                                     .gap(px(8.))
                                     .child(
-                                        choice(
+                                        Choice::new(
                                             "double_tap-history",
                                             "履歴を開く",
                                             self.settings.gestures.double_tap
@@ -399,7 +380,7 @@ impl Render for SettingsView {
                                         ),
                                     )
                                     .child(
-                                        choice(
+                                        Choice::new(
                                             "double_tap-paste",
                                             "ペースト",
                                             self.settings.gestures.double_tap
@@ -414,7 +395,7 @@ impl Render for SettingsView {
                                         ),
                                     )
                                     .child(
-                                        choice(
+                                        Choice::new(
                                             "double_tap-none",
                                             "操作なし",
                                             self.settings.gestures.double_tap

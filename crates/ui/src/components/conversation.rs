@@ -1,7 +1,4 @@
-use gpui::{
-    App, IntoElement, ParentElement, RenderOnce, ScrollHandle, SharedString,
-    StatefulInteractiveElement, Styled, Window, div, px, rgb, rgba,
-};
+use gpui::{App, ScrollHandle, SharedString, Window, div, prelude::*, px, rgb, rgba};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ToolStatus {
