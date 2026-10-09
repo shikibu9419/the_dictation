@@ -27,7 +27,7 @@ falseまたは対応するfinalで終了猶予（初期値50ms）を始める。
 
 ## タップ
 
-83のshortと、そのsourceのfinalを確認してからSingle待ち（初期値300ms）へ進む。次もshortならDouble、次のtrueを期限内に観測した場合は後続の分類までSingleを保留する。後続がlongならSingle→録音、shortならDouble。
+83のshortと、そのsourceのfinalを確認してからSingle待ち（初期値100ms）へ進む。次もshortならDouble、次のtrueを期限内に観測した場合は後続の分類までSingleを保留する。後続がlongならSingle→録音、shortならDouble。
 
 期限内に次のCが既知で未解析なら、その時点の取得範囲を固定して待つ。Sの低8bit件数の変化だけが先に分かった場合は、Rの応答で範囲を確定してから、その範囲のCを待つ。8bitから16bitの件数を推測しない。後から増えた別のCで待機を延長しない。3回はDouble+Single、4回はDouble+Double。確定したタップはフックに一度だけ渡し、空の認識結果や履歴を作らない。
 
@@ -45,7 +45,7 @@ falseまたは対応するfinalで終了猶予（初期値50ms）を始める。
 
 ## 設定とログ
 
-`Settings.reception` の各期限は候補開始時の値を使う。ファイル変更後は既存のreloadで反映する。省略時は表示・再開が各50ms、タップ連結300ms、live投入200ms、状態確認の開始間隔50ms。
+`Settings.reception` の各期限は候補開始時の値を使う。ファイル変更後は既存のreloadで反映する。省略時は表示・再開が各50ms、タップ連結100ms、live投入200ms、状態確認の開始間隔50ms。
 
 `Reception observation / snapshot / action`、`Button history`、`PCM store`、`live PCM / whole PCM` を `--log` に記録する。`button_timing` はS観測の診断であり、物理エッジの復元やジェスチャ分類には使わない。
 

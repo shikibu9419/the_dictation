@@ -17,7 +17,7 @@ impl Default for Reception {
         Self {
             hold_ui_delay_ms: 50,
             long_resume_grace_ms: 50,
-            tap_sequence_grace_ms: 300,
+            tap_sequence_grace_ms: 100,
             live_chunk_ms: 200,
             state_poll_interval_ms: 50,
         }
@@ -51,7 +51,7 @@ mod tests {
         let policy: Reception = serde_json::from_str(r#"{"hold_ui_delay_ms":30}"#).unwrap();
         assert_eq!(policy.hold_ui_delay_ms, 30);
         assert_eq!(policy.long_resume_grace_ms, 50);
-        assert_eq!(policy.tap_sequence_grace_ms, 300);
+        assert_eq!(policy.tap_sequence_grace_ms, 100);
         assert_eq!(policy.live_chunk_ms, 200);
         assert_eq!(policy.state_poll_interval_ms, 50);
         assert!(serde_json::from_str::<Reception>(r#"{"hold_ui_delai_ms":30}"#).is_err());

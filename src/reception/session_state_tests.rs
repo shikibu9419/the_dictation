@@ -629,10 +629,23 @@ fn a_source_cannot_move_between_sessions_as_later_collections_arrive() {
 }
 
 #[test]
-fn default_tap_window_accepts_measured_241_and_270_ms_gaps_but_not_late_taps() {
-    for gap in [241, 270, 300] {
+fn default_tap_window_uses_early_count_hints_without_waiting_for_full_transfer() {
+    // C2712 -> C2713 and C2714 -> C2715: the next count was observed
+    // after 61/60 ms, although the corresponding C arrived after 241/270 ms.
+    for (hint, gap) in [(61, 241), (60, 270)] {
         let mut m = SessionState::default();
         audio(&mut m, 0, "a", 1, Some(Press::Short), true);
+        m.observe(hint, Observation::RangePending(true)).unwrap();
+        assert!(gestures(&m.tick(100).unwrap()).is_empty());
+        m.observe(
+            120,
+            Observation::Watermark {
+                known_end: 3,
+                processed_end: 2,
+            },
+        )
+        .unwrap();
+        m.observe(120, Observation::RangePending(false)).unwrap();
         assert!(gestures(&m.tick(gap - 1).unwrap()).is_empty());
         assert_eq!(
             gestures(&audio(&mut m, gap, "b", 2, Some(Press::Short), true)),
@@ -642,9 +655,10 @@ fn default_tap_window_accepts_measured_241_and_270_ms_gaps_but_not_late_taps() {
     }
     let mut m = SessionState::default();
     audio(&mut m, 0, "a", 1, Some(Press::Short), true);
-    assert_eq!(gestures(&m.tick(300).unwrap()), [Gesture::SinglePush]);
-    assert!(gestures(&audio(&mut m, 301, "b", 2, Some(Press::Short), true)).is_empty());
-    assert_eq!(gestures(&m.tick(601).unwrap()), [Gesture::SinglePush]);
+    assert!(gestures(&m.tick(99).unwrap()).is_empty());
+    assert_eq!(gestures(&m.tick(100).unwrap()), [Gesture::SinglePush]);
+    assert!(gestures(&audio(&mut m, 101, "b", 2, Some(Press::Short), true)).is_empty());
+    assert_eq!(gestures(&m.tick(201).unwrap()), [Gesture::SinglePush]);
 }
 
 #[test]
