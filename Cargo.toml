@@ -17,6 +17,7 @@ clap = { version = "4", features = ["derive"] }
 cmake = "0.1"
 fs2 = "0.4"
 futures = "0.3"
+futures-util = "0.3"
 gpui = { version = "0.2.2", default-features = false, features = ["font-kit"] }
 gpui-component = { version = "=0.5.1", default-features = false }
 hound = "3.5"
@@ -30,10 +31,12 @@ subtle = "2"
 tempfile = "3"
 tokenizers = { version = "0.21", default-features = false, features = ["onig"] }
 tokio = { version = "1", features = ["full"] }
+tokio-tungstenite = { version = "0.30", features = ["rustls-tls-native-roots"] }
 tower = { version = "0.5", features = ["util"] }
 tracing = "0.1"
 uuid = { version = "1", features = ["v4"] }
 whisper-rs = { version = "0.16", features = ["metal"] }
+rubato = "0.16"
 
 pebble-core = { path = "crates/core" }
 pebble-ring = { path = "crates/pebble-ring" }
