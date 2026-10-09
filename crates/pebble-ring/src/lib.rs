@@ -8,5 +8,6 @@ pub mod input;
 pub mod pairing;
 pub mod reception;
 pub mod recordings;
+pub mod ring_input;
 #[cfg(test)]
 mod tests;

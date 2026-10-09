@@ -4506,6 +4506,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "pebble-jev"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "base64 0.22.1",
+ "chrono",
+ "clap",
+ "futures",
+ "gpui",
+ "gpui-component",
+ "openai-realtime",
+ "pebble-core",
+ "pebble-ring",
+ "pebble-ui",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
 name = "pebble-ring"
 version = "0.1.0"
 dependencies = [

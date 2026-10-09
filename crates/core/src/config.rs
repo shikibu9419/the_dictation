@@ -13,8 +13,14 @@ fn config_root() -> PathBuf {
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from(std::env::var_os("HOME").unwrap()).join(".config"))
 }
+/// Ring pairing, cursor and Bluetooth lock. Shared by every app so the ring
+/// is paired once and never opened twice.
 pub fn directory() -> PathBuf {
     config_root().join("pebble-index-rust")
+}
+/// Settings directory of one application.
+pub fn app_directory(app: &str) -> PathBuf {
+    config_root().join(app)
 }
 pub fn saved_address() -> Result<Option<String>> {
     let data = match fs::read(directory().join("device.json")) {

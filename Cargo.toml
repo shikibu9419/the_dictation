@@ -36,7 +36,6 @@ tower = { version = "0.5", features = ["util"] }
 tracing = "0.1"
 uuid = { version = "1", features = ["v4"] }
 whisper-rs = { version = "0.16", features = ["metal"] }
-rubato = "0.16"
 
 pebble-core = { path = "crates/core" }
 pebble-ring = { path = "crates/pebble-ring" }
