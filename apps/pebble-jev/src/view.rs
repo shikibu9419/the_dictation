@@ -56,6 +56,8 @@ actions!(pebble_jev, [Dismiss, Quit]);
 enum Phase {
     Idle,
     Recording(u64),
+    /// Button released; the remaining audio is still arriving from the ring.
+    Receiving(u64),
     Thinking,
     Speaking,
 }
@@ -143,6 +145,13 @@ impl Jev {
                 self.error = None;
                 self.phase = Phase::Recording(session);
                 panel::audio_state(session);
+            }
+            UiEvent::Receiving(session) => {
+                if self.phase == Phase::Recording(session) {
+                    self.phase = Phase::Receiving(session);
+                    self.status = "録音を受信中…".into();
+                    panel::status(&format!("Pebble Jev · {}", self.status));
+                }
             }
             UiEvent::Level { session, level } => {
                 if self.phase == Phase::Recording(session) {
@@ -283,7 +292,7 @@ impl Render for Jev {
         surface = match self.phase {
             Phase::Recording(_) if circular => surface.indicator(MicIcon::new(reduce_motion)),
             Phase::Recording(_) => surface.indicator(RecordingDot::new(reduce_motion)),
-            Phase::Thinking => surface.indicator(Spinner::new(reduce_motion)),
+            Phase::Receiving(_) | Phase::Thinking => surface.indicator(Spinner::new(reduce_motion)),
             Phase::Speaking | Phase::Idle => surface,
         };
         if !circular {

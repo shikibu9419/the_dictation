@@ -13,7 +13,10 @@ use pebble_ring::{
     input::{RingInputConfig, gesture_types::Gesture},
     ring_input::{RingEvent, RingInput},
 };
-use std::{collections::HashMap, time::Duration};
+use std::{
+    collections::HashMap,
+    time::{Duration, Instant},
+};
 use tokio::sync::{mpsc, oneshot};
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
@@ -43,7 +46,12 @@ pub enum Entry {
 pub enum UiEvent {
     Status(String),
     Recording(u64),
-    Level { session: u64, level: f64 },
+    /// The button is up; the rest of the recording is still arriving over BLE.
+    Receiving(u64),
+    Level {
+        session: u64,
+        level: f64,
+    },
     Thinking,
     Speaking,
     Idle,
@@ -252,6 +260,8 @@ pub async fn run(options: SessionOptions) -> Result<()> {
                 let mut talk = Talk {
                     client,
                     events,
+                    connected_at: Instant::now(),
+                    reconnect: false,
                     ring: &ring,
                     playback: &playback,
                     tools: &tools,
@@ -285,9 +295,14 @@ pub async fn run(options: SessionOptions) -> Result<()> {
     }
 }
 
+/// Sessions end after 60 minutes; renew while idle before that.
+const SESSION_RENEWAL: Duration = Duration::from_secs(50 * 60);
+
 struct Talk<'a> {
     client: RealtimeClient,
     events: mpsc::UnboundedReceiver<ServerEvent>,
+    connected_at: Instant,
+    reconnect: bool,
     ring: &'a RingInput,
     playback: &'a Playback,
     tools: &'a Tools,
@@ -306,6 +321,7 @@ impl Talk<'_> {
     /// Returns `Ok` when the socket closes (reconnect), `Err` when ring input ends.
     async fn run(&mut self, ring_rx: &mut mpsc::UnboundedReceiver<RingEvent>) -> Result<()> {
         loop {
+            let idle = self.recording.is_none() && !self.response_active;
             tokio::select! {
                 event = ring_rx.recv() => match event {
                     Some(event) => self.ring_event(event).await?,
@@ -315,6 +331,13 @@ impl Talk<'_> {
                     Some(event) => self.server_event(event).await?,
                     None => return Ok(()),
                 },
+                _ = tokio::time::sleep_until((self.connected_at + SESSION_RENEWAL).into()), if idle => {
+                    self.output.debug("Realtime session nearing its 60 minute limit; renewing");
+                    return Ok(());
+                }
+            }
+            if self.reconnect {
+                return Ok(());
             }
         }
     }
@@ -360,7 +383,11 @@ impl Talk<'_> {
                 self.recording = Some(session);
                 (self.ui)(UiEvent::Recording(session));
             }
-            RingEvent::PressEnded { .. } => {}
+            RingEvent::PressEnded { session } => {
+                if self.recording == Some(session) {
+                    (self.ui)(UiEvent::Receiving(session));
+                }
+            }
             RingEvent::Audio {
                 session,
                 generation,
@@ -544,8 +571,10 @@ impl Talk<'_> {
                     "Realtime error: {} {:?}",
                     error.message, error.code
                 ));
-                if error.code.as_deref() != Some("input_audio_buffer_commit_empty") {
-                    (self.ui)(UiEvent::Error(error.message));
+                match error.code.as_deref() {
+                    Some("input_audio_buffer_commit_empty") => {}
+                    Some("session_expired") => self.reconnect = true,
+                    _ => (self.ui)(UiEvent::Error(error.message)),
                 }
             }
             _ => {}
