@@ -37,7 +37,7 @@ sh apps/pebble-jev/build-app.sh && open "target/Pebble Jev.app"
 | `voice` | `marin` | 応答音声 |
 | `languages` | `["ja","en"]` | 受け付ける言語。文字起こしのヒントになり、応答もこの言語に限定します |
 | `instructions` | 日本語の短い指示 | system プロンプト |
-| `reception` | `state_poll_interval_ms` 150、他は dictation と同じ | リングの受信タイミング。状態ポーリングは音声読み出しと BLE 帯域を奪い合うため、dictation より長めにしています |
+| `reception` | dictation と同じ既定（状態ポーリング 50 ms） | リングの受信タイミング。ポーリングを間引くとリングが遅い接続間隔に落ち、2 ターン目以降の転送が数倍遅くなります |
 
 ## 検証
 

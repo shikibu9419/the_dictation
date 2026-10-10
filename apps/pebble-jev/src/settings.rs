@@ -31,12 +31,9 @@ impl Default for Settings {
             voice: "marin".into(),
             languages: vec!["ja".into(), "en".into()],
             instructions: DEFAULT_INSTRUCTIONS.into(),
-            // State polls compete with audio reads for the BLE link; a slower
-            // poll leaves more of it for audio while the button is held.
-            reception: Reception {
-                state_poll_interval_ms: 150,
-                ..Reception::default()
-            },
+            // Frequent state polls keep the ring on its fast connection
+            // interval between turns; slower polling let it drop to a slow one.
+            reception: Reception::default(),
         }
     }
 }
